@@ -1,0 +1,5 @@
+DesktopFly
+.DS_Store
+*.log
+nohup.out
+/*.png
