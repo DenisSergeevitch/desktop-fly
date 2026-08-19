@@ -119,3 +119,30 @@ test('loom input reaches only the stimulated eye', () => {
   assert.ok(sim.rateLoom > 0, 'left-eye loom should drive the LC population');
   assert.notEqual(sim.rateDNaL - sim.rateDNaR, before);
 });
+
+test('walk-drive duty averages inside the documented 20-50% band', () => {
+  // The distributional form of CLAUDE.md's "walk-drive duty 20-50%". Per-run
+  // duty is seed-dependent (the 330 partner neurons draw random baselines that
+  // set the drive onto DNp09), so the claim only holds as a mean. Measured
+  // per-seed spread at seeds 1-8: 17, 35, 28, 29, 36, 35, 43, 34.
+  const duties: number[] = [];
+  for (const seed of [1, 2, 3, 4, 5]) {
+    const sim = new LIFSim(circuit, null, seed);
+    let on = 0;
+    let samples = 0;
+    for (let ms = 0; ms < 20_000; ms++) {
+      sim.gaitDrive = 0.5;
+      sim.gaitPhase = (ms % 125) / 125;   // 8 Hz gait
+      sim.step(1);
+      if (ms % 10 === 0) {
+        samples++;
+        if (sim.rateFwd / 10 > 0.22) on++;
+      }
+    }
+    duties.push(100 * on / samples);
+  }
+  const mean = duties.reduce((a, b) => a + b, 0) / duties.length;
+  assert.ok(mean >= 20 && mean <= 50,
+    `mean walk duty ${mean.toFixed(1)}% outside 20-50% (per seed: `
+    + `${duties.map((d) => d.toFixed(0)).join(', ')})`);
+});

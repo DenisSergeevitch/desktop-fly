@@ -2,13 +2,16 @@
   "name": "desktopfly-windows",
   "version": "0.1.0",
   "private": true,
-  "description": "Windows port of DesktopFly — real FlyWire connectome, live LIF sim",
+  "description": "Windows port of DesktopFly \u0432\u0402\u201d real FlyWire connectome, live LIF sim",
   "license": "MIT",
   "type": "module",
-  "engines": { "node": ">=24.0.0" },
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "test": "node --test",
     "datatest": "node src/cli/datatest.ts",
-    "simtest": "node src/cli/simtest.ts"
+    "simtest": "node src/cli/simtest.ts",
+    "simtest:strict": "node src/cli/simtest.ts --strict"
   }
 }
