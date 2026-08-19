@@ -150,7 +150,7 @@ test('every neuron has a 3-component position', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd windows && node --test src`
+Run: `cd windows && node --test`
 Expected: FAIL — `Cannot find module ... data.ts`
 
 - [ ] **Step 3: Write the scaffold and implementation**
@@ -167,7 +167,7 @@ Create `windows/package.json`:
   "type": "module",
   "engines": { "node": ">=24.0.0" },
   "scripts": {
-    "test": "node --test src",
+    "test": "node --test",
     "datatest": "node src/cli/datatest.ts",
     "simtest": "node src/cli/simtest.ts"
   }
@@ -370,7 +370,7 @@ windows/*.png
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd windows && node --test src`
+Run: `cd windows && node --test`
 Expected: PASS, 4 tests.
 
 Run: `cd windows && npm run datatest`
@@ -504,7 +504,7 @@ block: `baselineAt(i)` and `outDegree(i)`. Both are test-support, same status as
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd windows && node --test src`
+Run: `cd windows && node --test`
 Expected: FAIL — `Cannot find module ... sim.ts`
 
 - [ ] **Step 3: Write the implementation**
@@ -758,7 +758,7 @@ export class LIFSim {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd windows && node --test src`
+Run: `cd windows && node --test`
 Expected: PASS, 9 tests total.
 
 - [ ] **Step 5: Commit**
@@ -962,7 +962,7 @@ test('an empty index list is ignored', () => {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd windows && node --test src/core`
+Run: `cd windows && node --test`
 Expected: FAIL — `LIFSim.step not implemented yet (Task 3)` and
 `sim.stimulate is not a function`
 
@@ -1120,7 +1120,7 @@ dropped per the deviations list):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd windows && node --test src`
+Run: `cd windows && node --test`
 Expected: PASS, 20 tests.
 
 If the GF-at-rest or GF-latency test fails, **do not change the seed or relax
@@ -1292,7 +1292,7 @@ export class SignalBuilder {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd windows && node --test src`
+Run: `cd windows && node --test`
 Expected: PASS, 26 tests.
 
 - [ ] **Step 5: Commit**
@@ -1389,7 +1389,7 @@ export function circadianActivity(hour: number): number {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd windows && node --test src`
+Run: `cd windows && node --test`
 Expected: PASS, 29 tests.
 
 - [ ] **Step 5: Commit**
@@ -1645,7 +1645,7 @@ Node >= 24 (for native TypeScript type stripping). No dependencies.
 
 ```sh
 cd windows
-node --test src           # unit tests
+node --test               # unit tests
 npm run datatest          # data invariants (668 neurons / 18,968 edges / 23,210 points)
 npm run simtest           # circuit diagnostics, Swift-parity exit conditions
 npm run simtest:strict    # also asserts the ranges the Swift suite only prints
@@ -1672,7 +1672,7 @@ In the `## Build, run, verify` section, replace the "Platform" paragraph
 (Cocoa/SceneKit, bare `swiftc`, macOS 13+) and cannot be built or tested on
 Windows — say so plainly rather than implying its suites passed. The
 `windows/` subtree is the Electron/TypeScript port and IS verifiable here:
-`cd windows && node --test src && npm run simtest:strict`. `etl.py` and the
+`cd windows && node --test && npm run simtest:strict`. `etl.py` and the
 `data/*.json` invariants are checkable on either platform.
 ```
 
@@ -1698,7 +1698,7 @@ git commit -m "Windows port M1: document the port's status and commands"
 
 ## M1 Definition of Done
 
-- [ ] `cd windows && node --test src` — all tests pass
+- [ ] `cd windows && node --test` — all tests pass
 - [ ] `npm run datatest` — exit 0
 - [ ] `npm run simtest:strict` — exit 0 at seeds 1, 2, and 3
 - [ ] `npx tsc --noEmit` type-checks clean (needs a one-off `npx`; skip if
