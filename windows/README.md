@@ -3,11 +3,13 @@
 Windows port of DesktopFly. The brain is the same: the same `data/` files, the
 same 668-neuron FlyWire v783 circuit, the same 1 kHz LIF dynamics.
 
-**Status: M3 — the fly lives in your desktop.** A transparent, click-through,
-always-on-top overlay; your cursor is a real looming stimulus into the LC4/LPLC2
-population; your window title bars are walkable ledges; going idle at night puts
-it to sleep; clicks are substrate taps; and a busy PC makes it faster. The tray
-menu is still to come (M5), so quit with Ctrl+C in the launching terminal.
+**Status: M4 — the brain is visible.** A transparent, click-through,
+always-on-top overlay spanning every monitor; your cursor is a real looming
+stimulus into the LC4/LPLC2 population; your window title bars are walkable
+ledges; going idle at night puts it to sleep; clicks are substrate taps; a busy
+PC makes it faster; and a second window shows the actual brain, with live spikes
+and click-to-stimulate. The tray menu is still to come (M5), so quit with Ctrl+C
+in the launching terminal.
 
 ## Requirements
 
@@ -29,7 +31,7 @@ scripts, the two dependencies behave differently:
 
 ```sh
 cd windows
-node --test               # unit tests (112)
+node --test               # unit tests (141)
 npm run datatest          # data invariants (668 neurons / 18,968 edges / 23,210 points)
 npm run simtest           # circuit diagnostics, Swift-parity exit conditions
 npm run simtest:strict    # also asserts the ranges the Swift suite only prints
@@ -38,6 +40,7 @@ npm run typecheck         # tsc --noEmit
 
 npm start                 # the overlay: a fly on your desktop (Ctrl+C to quit)
 npm run snapshot          # offscreen fly render -> fly.png
+npm run brainshot         # offscreen brain render -> brain.png
 npm run sensetest         # what the Win32 senses see on this machine
 ```
 
@@ -103,6 +106,49 @@ Getting there required fixing a colour-space bug that no test could see —
 `THREE.Color(r, g, b)` interprets its arguments in the linear working space,
 while the Swift source specifies sRGB via `NSColor(calibratedRed:)`. Passing
 sRGB numbers through as linear washed the entire fly out.
+
+## The brain window
+
+Opens automatically beside the fly (bottom-right) when `data/` is present, and
+unlike the overlay it is an ordinary interactive window.
+
+- **23,210 real soma positions** from FlyWire v783, coloured by super-class, drawn
+  additively so the optic lobes glow and internal structure shows through.
+- **The 668-neuron circuit** on top, brighter and larger, coloured per role — cyan
+  looming detectors, orange steering, green walking, magenta moonwalker, and the
+  two Giant Fibers as glowing gold markers.
+- **Live spikes** flash at their true anatomical positions. A giant-fiber spike
+  flashes 3.2x larger and lingers twice as long, so an escape is unmissable.
+- **Hovering pauses the rotation**, so you can aim at a target.
+- **Clicking stimulates** the ~60 nearest circuit neurons for 400 ms and names
+  what you hit. The fly's reaction is whatever the real network does downstream:
+  click the gold Giant Fiber markers and it escapes; click DNg11 and it grooms;
+  click one side's DNa01/02 and it turns.
+
+The simulation stays in the *overlay* process. Spikes travel overlay → main →
+brain and stimulation requests travel back, so only visuals cross IPC — the
+LC→GF escape race, where 4 ms decides whether the fly gets away, never does.
+
+## Multi-monitor behaviour (a deliberate departure from macOS)
+
+macOS keeps the fly on one display and offers a "Move to Next Display" menu item.
+On Windows the desktop is one continuous space, so **the overlay spans every
+display** instead.
+
+That creates a problem the macOS build never has: a window must be rectangular,
+but monitors of different sizes or vertical offsets do not tile a rectangle. On
+the development machine the bounding box is 4096x1545 while the two monitors
+(2560x1392 at the origin, 1536x912 offset *down* by 633) leave large parts of it
+on no display at all — a fly walking there would simply vanish. `core/arena.ts`
+therefore constrains the fly to the **union of the real monitor rectangles**: it
+turns around at the invisible wall between screens, flight targets are drawn from
+covered area only, and even its start position is clamped, because the scene
+origin itself can fall in the gap.
+
+**Known cost:** one window has a single scale factor, so with mixed DPI (150% and
+125% here) the fly renders about 20% larger on the lower-scaled screen. Window
+rectangles are converted per-monitor via `screen.screenToDipRect`, so the terrain
+is correct on both regardless.
 
 ## Desktop ecology (all permission-free)
 

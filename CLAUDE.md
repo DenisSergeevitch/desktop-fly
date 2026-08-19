@@ -18,7 +18,7 @@ SceneKit; the brain data is real.
 | `Environment.swift` | permission-free senses: `WindowSense` (ledges/looms), circadian curve, user idle, thermal tempo |
 | `etl.py` | raw Codex dumps → `data/brain_points.json` + `data/circuit.json` |
 | `data/` | shipped derived data (CC BY-NC 4.0 — see `data/DATA_LICENSE.md`) |
-| `windows/` | Electron + TypeScript + Three.js port: `src/core` the sim, sense rules and transductions, `src/body` the body + `Fly` + `Coordinator`, `src/main` the Electron shell + `win32.ts` (koffi FFI), `src/renderer` the WebGL renderer, `src/cli` the suites (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
+| `windows/` | Electron + TypeScript + Three.js port: `src/core` the sim, sense rules, arena and picking, `src/body` the body + `Fly` + `Coordinator`, `src/main` the Electron shell + `win32.ts` (koffi FFI), `src/renderer` the overlay and brain renderers, `src/cli` the suites (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
 
 ## Build, run, verify
 
@@ -75,6 +75,18 @@ subtree is the Electron/TypeScript port and IS verifiable here:
   `LASTINPUTINFO` must be declared `_Inout_` or `dwTime` comes back 0.
 - Window ids must be **HWNDs**: with array indices every poll reports every
   window as newly appeared, and ledge tracking breaks.
+
+**Windows port architecture** (differs from macOS in two deliberate ways):
+- **The sim lives in the overlay renderer**, not main. Spikes travel overlay →
+  main → brain window and stimulation travels back, so only visuals cross IPC —
+  the LC→GF escape race, where 4 ms decides the outcome, never does. Do not move
+  the sim to main "for tidiness".
+- **The overlay spans every display**, where macOS keeps one screen and hops on
+  command. The window is the bounding box; `core/arena.ts` confines the fly to the
+  union of the real monitor rectangles, because offset monitors of different sizes
+  leave parts of that box on no display. Point sizing in the brain window must be
+  **screen-space** (`sizeAttenuation: false`), matching SceneKit's
+  min/maxPointScreenSpaceRadius, or the 23k-point cloud reads as dim dust.
 
 **Caveat on the walk-duty invariant**: "walk-drive duty 20–50%" is a typical
 run, not a bound. The 330 partner neurons draw random baselines that set the
