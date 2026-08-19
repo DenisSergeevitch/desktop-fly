@@ -277,15 +277,141 @@ export class Fly {
     this.syncNode();
   }
 
-  // Filled in by M2a Task 5 — FlyModel.swift:444-505.
-  private brainBehavior(_s: BrainSignals, _dt: number, _bounds: Bounds,
-                        _mouse: Point | null): void {
-    // intentionally empty until Task 5
+  // Every behavioral decision here reads a real neuron population's rate.
+  // FlyModel.swift:444-505. The order of these branches is load-bearing:
+  // escape wins outright, sleep gates everything below it, and the MDN burst
+  // must remain reachable from every grounded state.
+  private brainBehavior(s: BrainSignals, dt: number, bounds: Bounds,
+                        mouse: Point | null): void {
+    // Giant fiber spike -> escape takeoff (even startles it out of sleep)
+    if (s.escape && this.scareCooldown === 0) {
+      this.startFlight({ bounds, awayFrom: mouse, escape: true });
+      return;
+    }
+    // circadian sleep: enter, hold (no walk/groom/dart while asleep), wake to
+    // grooming
+    if (s.sleep) {
+      if (this.state !== 'sleeping') {
+        this.setState('sleeping');
+        this.speed = 0;
+        this.dartTimer = 0;
+        this.backwardTimer = 0;
+      }
+      return;
+    } else if (this.state === 'sleeping') {
+      this.setState('grooming');   // flies groom after waking
+      return;
+    }
+    // Looming detectors hot but GF quiet -> nervous dart away
+    if (s.nervous > 0.40 && this.dartCooldown === 0) {
+      this.ledge = null;
+      this.setState('walking');
+      if (mouse !== null) {
+        this.heading = Math.atan2(this.pos.y - mouse.y, this.pos.x - mouse.x)
+          + rnd(this.rng, -0.4, 0.4);
+      } else {
+        this.heading += rnd(this.rng, -1.5, 1.5);
+      }
+      this.speed = rnd(this.rng, 110, 155);
+      this.dartTimer = rnd(this.rng, 0.4, 0.9);
+      this.dartCooldown = 1.2;
+    }
+    // DNg11 (grooming command) hysteresis
+    if (this.state !== 'walking' || this.dartTimer === 0) {
+      if (this.state !== 'grooming' && s.groomDrive > 0.5 && s.nervous < 0.3
+          && this.stateAge > 0.4) {
+        this.setState('grooming');
+      } else if (this.state === 'grooming' && s.groomDrive < 0.3
+                 && this.stateAge > 0.6) {
+        this.setState('idle');
+      }
+    }
+    // DNp09 (forward-walking command) hysteresis
+    if (this.state === 'idle' && s.walkDrive > 0.22 && this.stateAge > 0.4) {
+      this.setState('walking');
+      this.heading += rnd(this.rng, -0.8, 0.8);
+    } else if (this.state === 'walking' && this.dartTimer === 0
+               && s.walkDrive < 0.08 && this.stateAge > 0.5) {
+      this.setState('idle');
+      this.speed = 0;
+    }
+    // MDN burst -> backward walk, from any grounded state
+    if (s.backward && this.backwardTimer === 0 && this.dartTimer === 0) {
+      if (this.state !== 'walking') {
+        this.setState('walking');
+        this.speed = 0;
+      }
+      this.backwardTimer = 0.5;
+    }
+    // walking speed follows the forward command rate; tempo = temperature
+    if (this.state === 'walking') {
+      if (this.dartTimer === 0 && this.backwardTimer === 0) {
+        const target = (14 + s.walkDrive * 55) * s.tempo;
+        this.speed += (target - this.speed) * Math.min(1, 3 * dt);
+      }
+      // DNa01/DNa02 steering — suppressed while attached to a ledge
+      if (this.ledge === null) this.heading += s.turnBias * dt;
+    }
+    // spontaneous takeoff, gated on whole-population arousal; flight
+    // altitude/effort scales with how aroused the network is
+    const flightChance = s.arousal > 0.5 ? 0.6 : 0.005;
+    if (this.state === 'walking' && rnd(this.rng, 0, 1) < flightChance * dt) {
+      this.startFlight({ bounds, effort: 0.35 + s.arousal * 0.6 });
+    }
   }
 
-  // Filled in by M2a Task 4 — FlyModel.swift:509-555.
-  private updateWalk(_dt: number, _bounds: Bounds): void {
-    // intentionally empty until Task 4
+  // FlyModel.swift:509-555
+  private updateWalk(dt: number, bounds: Bounds): void {
+    // refresh the attached ledge from current terrain (windows move/close)
+    if (this.ledge !== null) {
+      const L = this.ledge;
+      const cur = this.terrain.find((t) => t.id === L.id);
+      if (cur !== undefined && Math.abs(cur.y - L.y) < 40) {
+        this.ledge = cur;
+      } else {
+        this.ledge = null;
+        this.startFlight({ bounds });   // the ground vanished from under it
+        return;
+      }
+    }
+    if (this.ledge !== null) {
+      const L = this.ledge;
+      // walk along the window edge
+      this.heading += rnd(this.rng, -1, 1) * 0.2 * dt;
+      const along = Math.cos(this.heading) >= 0 ? 0 : Math.PI;
+      this.heading += angleDiff(this.heading, along) * Math.min(1, 6 * dt);
+      this.pos.x += Math.cos(this.heading) * this.effectiveSpeed * dt;
+      this.pos.y += (L.y - this.pos.y) * Math.min(1, 10 * dt);
+      if (this.pos.x <= L.x0 + 6 && Math.cos(this.heading) < 0) this.heading = 0;
+      if (this.pos.x >= L.x1 - 6 && Math.cos(this.heading) > 0) this.heading = Math.PI;
+      this.pos.x = clampf(this.pos.x, L.x0, L.x1);
+      if (rnd(this.rng, 0, 1) < 0.05 * dt) this.ledge = null;   // wander off
+    } else {
+      this.heading += rnd(this.rng, -1, 1) * 1.6 * dt;
+      const hw = bounds.width / 2 - EDGE_MARGIN;
+      const hh = bounds.height / 2 - EDGE_MARGIN;
+      if (Math.abs(this.pos.x) > hw || Math.abs(this.pos.y) > hh) {
+        const toCenter = Math.atan2(-this.pos.y, -this.pos.x);
+        this.heading += angleDiff(this.heading, toCenter) * Math.min(1, 4 * dt);
+      }
+      const v = this.effectiveSpeed;
+      this.pos.x += Math.cos(this.heading) * v * dt;
+      this.pos.y += Math.sin(this.heading) * v * dt;
+      this.pos.x = clampf(this.pos.x, -bounds.width / 2 + 20, bounds.width / 2 - 20);
+      this.pos.y = clampf(this.pos.y, -bounds.height / 2 + 20, bounds.height / 2 - 20);
+      // walked onto a window edge? latch on
+      for (const L of this.terrain) {
+        if (this.pos.x > L.x0 - 8 && this.pos.x < L.x1 + 8
+            && Math.abs(this.pos.y - L.y) < 20) {
+          if (rnd(this.rng, 0, 1) < 0.9 * dt) {
+            this.ledge = L;
+            this.heading = Math.cos(this.heading) >= 0 ? 0 : Math.PI;
+            break;
+          }
+        }
+      }
+    }
+    this.node.position.z = 0.35 * Math.abs(Math.sin(this.gaitPhase * Math.PI * 2));
   }
 
   private get effectiveSpeed(): number {
