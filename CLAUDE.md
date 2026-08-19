@@ -1,4 +1,6 @@
-# DesktopFly — agent notes
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 A 3D fruit fly on a transparent macOS overlay, behavior-driven by a 1 kHz
 leaky-integrate-and-fire (LIF) simulation of a 668-neuron circuit extracted
@@ -29,9 +31,25 @@ SceneKit; the brain data is real.
 ```
 
 Always run **both** suites after any change; they are the ground truth.
-Key invariants: GF silent over 4 s of rest, GF fires ≤ ~10 ms after abrupt
-loom, walk-drive duty 20–50%, siesta (scale 0.84) walk-drive > 3%,
-no per-frame scale/z snap at landing.
+Both binaries locate `data/` next to the executable or in the cwd
+(`findDataDir`) — run them from the repo root or they exit "no data/".
+`DESKTOPFLY_FPS=1 ./DesktopFly` logs frame rate to stderr every 5 s.
+
+`--simtest` exits non-zero only on these five (`main.swift:223`): zero GF
+spikes over 4 s of rest · ≥1 GF spike during an abrupt loom · walk-drive
+crosses its threshold at least once in 20 s · GF-cluster click stimulation
+produces a spike · siesta (activityScale 0.84) walk-drive duty > 3%.
+Everything else it prints — loom→GF latency (~4 ms), LC/DNa/pop rates,
+left-eye steering diff, air-puff GF count — is a **diagnostic, not an
+assertion**: read the numbers, don't rely on the exit code to catch a drift
+in them. `--behaviortest` is 17 hard checks (7 stimulate-the-sim scenarios +
+10 hand-built-signal body checks, incl. no per-frame scale/z snap at landing).
+
+**Platform**: the code is macOS-only (Cocoa/SceneKit, bare `swiftc`, macOS
+13+). This checkout is on Windows, where neither `build.sh` nor the suites can
+run — Swift changes here are unverified until someone builds them on a Mac.
+Say so plainly rather than implying the suites passed. `etl.py` and the
+`data/*.json` invariants *are* checkable anywhere with Python.
 
 **SourceKit note**: the IDE reports "Cannot find type ..." across files —
 false positives. The five .swift files compile as one module via build.sh;
@@ -46,6 +64,56 @@ trust the compiler, not single-file diagnostics.
   click monitor — these only call enqueue/setters.
 - Brain window has its own render delegate; spikes cross via `SpikeBus` (locked).
 - `LIFSim.stimulate()` is thread-safe (pending list merged at `step()`).
+
+## Frame contract (`Coordinator.renderer`, main.swift:632)
+
+The one place the body↔brain loop closes; read it top-to-bottom before changing
+any sense or signal.
+
+1. **senses → sim inputs** — `loomL/loomR` = max(cursor loom, exponentially
+   decaying window loom); `airPuff` = max(cursor whoosh, `typingLevel × 0.30`);
+   `gaitDrive`/`gaitPhase` = fly #1's `walkingIntensity`/`gaitPhasePublic`
+   (body→brain proprioception, injected onto ascending neurons with per-neuron
+   phase offsets); `activityScale` = `(1 − (1−activity)×0.35) × (sleepy ? 0.75 : 1)`;
+   `sensoryGate` = 0.55 asleep. `computeLoom` (radial approach ÷ distance,
+   split between eyes by bearing sign) is the last non-connectome step —
+   everything downstream of LC4/LPLC2 is real wiring.
+2. **fixed 1 kHz stepping** — `msAccumulator` turns frame dt into whole
+   milliseconds, clamped to 50 per frame, so the sim never chases a stalled
+   render thread. `sim.simMs` therefore drifts behind wall time after a hitch.
+3. **rates → commands** — `SignalBuilder.make`, shared verbatim with
+   `--behaviortest` (that's what makes the suite meaningful).
+4. **commands → body** — `fly.update(...)`: fly #1 gets `signals`, the rest `nil`.
+
+`SignalBuilder` normalizations — change a divisor and every threshold in
+`brainBehavior` shifts with it:
+
+| signal | formula | clamp |
+|---|---|---|
+| `escape` | `consumeGF()` — latch, drained once per frame | bool |
+| `nervous` | `rateLoom / 80` | 0…1 |
+| `turnBias` | `(rateDNaL − rateDNaR − 8 s EMA baseline) × 0.04` | ±1 |
+| `walkDrive` | `rateFwd / 10` | 0…1.3 |
+| `groomDrive` | `rateGroom / 8` | **none** — add one if you touch it |
+| `wingDrive` | `rateEscW / 10` | 0…1.3 |
+| `arousal` | `ratePop / 20` | 0…1 |
+| `backward` | `rateMDN > 8` | bool |
+
+`tempo` and `sleep` are set by the coordinator afterwards, not by the sim.
+
+## Body state machine (`FlyModel.swift`)
+
+`State = walking | idle | grooming | flying | sleeping`. `Fly.update` routes
+three ways: `flying` → `updateFlight` only, so brain signals reach the **wings**
+(`brainLive`/`liveArousal`/`liveWing` → `effortCurrent`) but never the
+trajectory — flight is ballistic from `startFlight` to the flare; grounded with
+signals → `brainBehavior`; grounded without signals → the legacy
+mouse-distance path (`SCARE_RADIUS`/`NERVOUS_RADIUS`, extra flies only).
+
+Inside `brainBehavior` the order is load-bearing: `escape` is tested first and
+interrupts even sleep; `sleep` then returns early, so nothing else can fire
+while asleep (waking always routes through `.grooming`). Ledge attachment lives
+in `updateWalk`, and `heading += turnBias·dt` is suppressed while on a ledge.
 
 ## Neuron → behavior mapping (current)
 
@@ -113,6 +181,9 @@ distance-based behavior (`signals: nil` path).
   CC BY-NC 4.0 (FlyWire terms) — keep the license split intact.
 - README numeric claims (neuron/edge/synapse counts, latencies) must match
   `data/*.json` and suite output — reviewers falsify them against the data.
+  Current truth (checkable without a Mac):
+  `python -c "import json;c=json.load(open('data/circuit.json'));print(len(c['neurons']),len(c['edges']))"`
+  → 668 neurons, 18,968 edges (~203k synapses), 23,210 brain points.
 - `.gitignore` covers the binary, logs, and root-level PNGs (diagnostics
   outputs); intentional images live in `assets/`.
 - Local folder is `fly-brain`; the remote is `desktop-fly` — harmless.
