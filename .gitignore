@@ -8,3 +8,5 @@ nohup.out
 windows/node_modules/
 windows/dist/
 windows/*.png
+windows/*.log
+windows/*.txt

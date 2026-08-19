@@ -12,16 +12,22 @@ import { FLY_SCALE } from './constants.ts';
 // FlyModel.swift:24-31. SceneKit's .blinn lighting model is Phong shading with
 // a Blinn-Phong specular term, which MeshPhongMaterial provides. SceneKit's
 // shininess is 0..1; Three's is a specular exponent, so scale by 100.
-function mat(color: number, specular = 0.25, shininess = 0.25): THREE.MeshPhongMaterial {
+function mat(color: THREE.Color, specular = 0.25, shininess = 0.25): THREE.MeshPhongMaterial {
   return new THREE.MeshPhongMaterial({
     color,
-    specular: new THREE.Color(specular, specular, specular),
+    specular: new THREE.Color().setRGB(specular, specular, specular,
+      THREE.SRGBColorSpace),
     shininess: shininess * 100,
   });
 }
 
-function rgb(r: number, g: number, b: number): number {
-  return new THREE.Color(r, g, b).getHex();
+// The Swift source uses NSColor(calibratedRed:...), i.e. sRGB components.
+// THREE.Color(r, g, b) interprets its arguments in the LINEAR working space, so
+// passing sRGB values straight through visibly washes the whole fly out. Convert
+// explicitly. (Caught by rendering a snapshot and comparing with assets/fly.png
+// — no transform test can see it.)
+function rgb(r: number, g: number, b: number): THREE.Color {
+  return new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace);
 }
 
 // FlyModel.swift:43-58 — four dark bands over a lighter base. The Swift version
@@ -130,7 +136,7 @@ function buildLeg(
   knee.add(ankle);
 
   // legColor blended 25% toward black
-  const tarsusColor = new THREE.Color(legColor).multiplyScalar(0.75).getHex();
+  const tarsusColor = legColor.clone().multiplyScalar(0.75);
   const tarsusNode = new THREE.Mesh(capsule(0.24, tarsus), mat(tarsusColor));
   tarsusNode.rotation.set(0, 0, -Math.PI / 2);
   tarsusNode.position.set(tarsus / 2, 0, 0);
@@ -159,7 +165,7 @@ function wingMaterial(): THREE.MeshPhongMaterial {
     color: rgb(0.92, 0.92, 0.92),
     opacity: 0.28,
     transparent: true,
-    specular: new THREE.Color(0.9, 0.9, 0.9),
+    specular: new THREE.Color().setRGB(0.9, 0.9, 0.9, THREE.SRGBColorSpace),
     shininess: 90,
     side: THREE.DoubleSide,
   });
@@ -180,7 +186,7 @@ export function buildFlyModel(): FlyModelParts {
 
   const abdMat = new THREE.MeshPhongMaterial({
     map: abdomenTexture(),
-    specular: new THREE.Color(0.3, 0.3, 0.3),
+    specular: new THREE.Color().setRGB(0.3, 0.3, 0.3, THREE.SRGBColorSpace),
     shininess: 35,
   });
   const abdomen = new THREE.Mesh(new THREE.SphereGeometry(5.0, 24, 16), abdMat);
@@ -189,7 +195,7 @@ export function buildFlyModel(): FlyModelParts {
   root.add(abdomen);
 
   // bodyBrown blended 15% toward white
-  const headColor = new THREE.Color(bodyBrown).lerp(new THREE.Color(1, 1, 1), 0.15).getHex();
+  const headColor = bodyBrown.clone().lerp(new THREE.Color(1, 1, 1), 0.15);
   const head = new THREE.Mesh(new THREE.SphereGeometry(3.0, 20, 14), mat(headColor));
   head.position.set(0, 9.0, 6.0);
   head.scale.set(1.0, 0.85, 0.9);

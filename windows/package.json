@@ -14,14 +14,19 @@
     "simtest": "node src/cli/simtest.ts",
     "simtest:strict": "node src/cli/simtest.ts --strict",
     "typecheck": "tsc --noEmit",
-    "behaviortest": "node src/cli/behaviortest.ts"
+    "behaviortest": "node src/cli/behaviortest.ts",
+    "build": "node build.mjs",
+    "start": "npm run build && electron dist/main.cjs",
+    "snapshot": "npm run build && electron dist/snapshot.cjs"
   },
   "devDependencies": {
     "@types/node": "^24",
     "@types/three": "^0.185.4",
+    "esbuild": "^0.28.2",
     "typescript": "^5"
   },
   "dependencies": {
+    "electron": "^43.4.1",
     "three": "^0.185.1"
   }
 }

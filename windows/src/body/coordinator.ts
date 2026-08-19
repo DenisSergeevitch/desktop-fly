@@ -54,7 +54,8 @@ export function buildScene(bounds: Bounds): THREE.Scene {
   camera.name = 'camera';
   scene.add(camera);
 
-  const key = new THREE.DirectionalLight(0xffffff, 2.2);
+  // intensities mirror SceneKit's 1000 key / 550 ambient (main.swift:33-49)
+  const key = new THREE.DirectionalLight(0xffffff, 1.0);
   key.position.set(0, 0, 300);
   key.castShadow = true;
   key.shadow.mapSize.set(1024, 1024);
@@ -62,7 +63,7 @@ export function buildScene(bounds: Bounds): THREE.Scene {
   key.rotation.set(-0.35, 0.30, 0);
   scene.add(key);
 
-  const ambient = new THREE.AmbientLight(0xffffff, 1.4);
+  const ambient = new THREE.AmbientLight(0xffffff, 0.55);
   scene.add(ambient);
 
   // Shadow catcher: SceneKit uses a plane with colorBufferWriteMask = [] that

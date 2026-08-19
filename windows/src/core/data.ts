@@ -23,12 +23,26 @@ export interface CircuitFile {
 
 // Equivalent of Sim.swift:38-47. The Windows build reads the repo's shared
 // data/ in place — it is CC BY-NC 4.0 and is never copied into windows/.
+// This module runs in two module systems: ESM under Node (tests and the
+// diagnostic CLIs, via type stripping) and CommonJS inside the esbuild bundle
+// that Electron's main process loads. `import.meta.url` is undefined in the CJS
+// output, so resolve the directory defensively — otherwise fileURLToPath throws
+// ERR_INVALID_ARG_TYPE and the overlay starts with no brain.
+function moduleDir(): string {
+  const url: unknown = typeof import.meta === 'object' ? import.meta.url : undefined;
+  if (typeof url === 'string' && url.length > 0) return dirname(fileURLToPath(url));
+  if (typeof __dirname === 'string') return __dirname;
+  return process.cwd();
+}
+
 export function findDataDir(): string | null {
-  const here = dirname(fileURLToPath(import.meta.url));
+  const here = moduleDir();
   const candidates = [
     join(here, 'data'),                        // packaged: resources/data
     resolve(here, '..', '..', 'data'),         // windows/data
-    resolve(here, '..', '..', '..', 'data'),   // repo root data/
+    resolve(here, '..', '..', '..', 'data'),   // repo root data/ (from src/core)
+    resolve(here, '..', 'data'),               // windows/data (from dist/)
+    resolve(here, '..', '..', 'data'),         // repo root data/ (from dist/)
     join(process.cwd(), 'data'),
     resolve(process.cwd(), '..', 'data'),
   ];
@@ -49,3 +63,4 @@ export function loadBrainData():
     return null;
   }
 }
+
