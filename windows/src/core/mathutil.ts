@@ -24,3 +24,17 @@ export function makeRng(seed: number): Rng {
 export function rnd(rng: Rng, lo: number, hi: number): number {
   return lo + (hi - lo) * rng();
 }
+
+// FlyModel.swift:16-21 — shortest signed turn from one heading to another.
+export function angleDiff(from: number, to: number): number {
+  let d = (to - from) % (2 * Math.PI);
+  if (d > Math.PI) d -= 2 * Math.PI;
+  if (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+// FlyModel.swift:22
+export function smoothstep(t: number): number {
+  const x = clampf(t, 0, 1);
+  return x * x * (3 - 2 * x);
+}
