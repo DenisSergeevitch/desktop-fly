@@ -5,7 +5,7 @@
 //
 // Build:  ./build.sh
 // Run:    ./DesktopFly                     (menu-bar 🪰; brain window shows live spikes)
-//         ./DesktopFly --snapshot out.png  (offscreen fly model render)
+//         ./DesktopFly --snapshot out.png [--top] [--flying] [--beetle]  (offscreen body)
 //         ./DesktopFly --brainshot out.png (offscreen brain window render)
 //         ./DesktopFly --simtest           (headless circuit test: spontaneous + loom)
 
@@ -77,11 +77,24 @@ func offscreenRender(_ scene: SCNScene, camNode: SCNNode, size: CGSize, path: St
     print("snapshot written to \(path)")
 }
 
-func runSnapshot(path: String) {
+/// `topDown: true` reproduces the desktop overlay's own view — orthographic,
+/// straight down, same key light. That is the only view users actually see, so
+/// it is the one to check body geometry against.
+func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false) {
     let scene = SCNScene()
     scene.background.contents = NSColor(calibratedWhite: 0.94, alpha: 1)
     let fly = Fly(at: .zero)
     fly.heading = .pi / 2
+    if flying {
+        fly.state = .idle
+        fly.startFlight(bounds: CGSize(width: 1400, height: 1400), effort: 0.9)
+        for _ in 0..<40 where fly.state == .flying {
+            fly.update(dt: 1.0 / 60, bounds: CGSize(width: 1400, height: 1400),
+                       mouse: nil, signals: BrainSignals())
+        }
+        fly.pos = .zero
+        fly.heading = .pi / 2
+    }
     for (i, leg) in fly.model.legs.enumerated() {
         leg.angle = [0.25, -0.2, -0.22, 0.28, 0.2, -0.25][i]
         leg.lift = [0.35, 0, 0, 0.3, 0, 0.35][i]
@@ -97,10 +110,19 @@ func runSnapshot(path: String) {
     let lookAt = SCNLookAtConstraint(target: fly.node)
     lookAt.isGimbalLockEnabled = true
     camNode.constraints = [lookAt]
+    if topDown {
+        camera.usesOrthographicProjection = true
+        camera.orthographicScale = 30
+        camera.zNear = 1
+        camera.zFar = 400
+        camNode.constraints = nil
+        camNode.position = SCNVector3(0, 0, 150)
+        camNode.eulerAngles = SCNVector3(0, 0, 0)
+    }
     scene.rootNode.addChildNode(camNode)
     let key = SCNLight(); key.type = .directional; key.intensity = 1100
     let keyNode = SCNNode(); keyNode.light = key
-    keyNode.eulerAngles = SCNVector3(-0.9, 0.5, 0)
+    keyNode.eulerAngles = topDown ? SCNVector3(-0.35, 0.30, 0) : SCNVector3(-0.9, 0.5, 0)
     scene.rootNode.addChildNode(keyNode)
     let amb = SCNLight(); amb.type = .ambient; amb.intensity = 500
     let ambNode = SCNNode(); ambNode.light = amb
@@ -452,6 +474,124 @@ func runBehaviorTest() {
         return (ok, String(format: "3h %.2f, 9h %.2f, 14h %.2f, 18h %.2f", night, dawn, siesta, dusk))
     }
 
+
+    // ---- body form: stag beetle geometry (behavior layer untouched) ----
+    let defaultForm = BODY_FORM
+    bodyCheck("beetle: elytra spread in flight and hold steady") {
+        BODY_FORM = .beetle
+        let fly = Fly(at: .zero)
+        guard let elytron = fly.model.elytraL, fly.model.elytraR != nil else {
+            return (false, "beetle model exposes no elytra")
+        }
+        fly.state = .idle
+        for _ in 0..<20 { fly.update(dt: dt, bounds: bounds, mouse: nil, signals: BrainSignals()) }
+        let closed = elytron.eulerAngles.z
+
+        fly.startFlight(bounds: bounds, effort: 0.8)
+        var open = closed, openDrive: CGFloat = 0
+        var lo = CGFloat.greatestFiniteMagnitude, hi = -CGFloat.greatestFiniteMagnitude
+        var sampled = 0, i = 0
+        while i < 40 && fly.state == .flying {
+            fly.update(dt: dt, bounds: bounds, mouse: nil, signals: BrainSignals())
+            if i >= 20 && fly.state == .flying {      // past the open-up transient
+                open = elytron.eulerAngles.z
+                openDrive = fly.elytraOpen
+                lo = min(lo, open); hi = max(hi, open); sampled += 1
+            }
+            i += 1
+        }
+        // the elytra must sit at a steady open angle, NOT buzz with the 20 Hz wingbeat
+        let jitter = sampled > 1 ? hi - lo : 999
+        return (openDrive > 0.8 && abs(open - closed) > 0.3 && jitter < 0.05,
+                String(format: "closed %.2f -> open %.2f rad, drive %.2f, jitter %.3f",
+                       closed, open, openDrive, jitter))
+    }
+
+    bodyCheck("beetle: threat opens the elytra without takeoff") {
+        BODY_FORM = .beetle
+        var detail = "no attempt ran"
+        // brainBehavior runs a 0.005/s spontaneous-takeoff lottery while walking,
+        // which ends the window early ~0.3% of the time for reasons unrelated to
+        // the posture. Retry rather than weaken the no-takeoff assertion: a real
+        // regression that launches the fly on threat loses all three attempts.
+        for _ in 0..<3 {
+            let fly = Fly(at: .zero)
+            guard let elytron = fly.model.elytraL else { return (false, "no elytra") }
+            fly.state = .walking; fly.speed = 20
+            fly.dartCooldown = 99   // isolate the posture from darting
+            let closed = elytron.eulerAngles.z
+            var threat = BrainSignals(); threat.wingDrive = 0.9; threat.walkDrive = 0.4
+            var tookOff = false
+            for _ in 0..<40 {
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: threat)
+                if fly.state == .flying { tookOff = true; break }
+            }
+            detail = String(format: "open %.2f, elytron %.2f -> %.2f rad%@",
+                            fly.elytraOpen, closed, elytron.eulerAngles.z,
+                            tookOff ? " (spontaneous takeoff, retried)" : "")
+            if !tookOff && fly.elytraOpen > 0.5
+                && abs(elytron.eulerAngles.z - closed) > 0.2 { return (true, detail) }
+        }
+        return (false, detail)
+    }
+
+    bodyCheck("body swap keeps behavior state, position and the model contract") {
+        BODY_FORM = .fly
+        let fly = Fly(at: CGPoint(x: 40, y: -20))
+        fly.state = .walking; fly.speed = 33; fly.heading = 1.2
+        for _ in 0..<30 { fly.update(dt: dt, bounds: bounds, mouse: nil, signals: walkSignals) }
+        let (st, sp, hd, p) = (fly.state, fly.speed, fly.heading, fly.pos)
+        let flyHadElytra = fly.model.elytraL != nil
+        let holder = SCNNode()
+        holder.addChildNode(fly.node)
+        let oldRoot = fly.node
+
+        BODY_FORM = .beetle
+        fly.swapBody()
+
+        let contract = fly.model.legs.count == 6
+            && fly.model.foldedWings.childNodes.count == 2
+            && fly.model.elytraL != nil && fly.model.elytraR != nil
+        let kept = fly.state == st && fly.speed == sp && fly.heading == hd && fly.pos == p
+        let reparented = fly.node !== oldRoot && oldRoot.parent == nil && fly.node.parent === holder
+        return (contract && kept && reparented && !flyHadElytra,
+                "contract=\(contract) state kept=\(kept) reparented=\(reparented) "
+                    + "fly form had elytra=\(flyHadElytra)")
+    }
+
+    for form in [BodyForm.fly, BodyForm.beetle] {
+        bodyCheck("[\(form.rawValue)] gait advances and the wings still beat") {
+            BODY_FORM = form
+            let fly = Fly(at: .zero)
+            fly.state = .walking; fly.speed = 40
+            let phase0 = fly.gaitPhasePublic
+            // amplitude over the window, not a single frame: an alternating
+            // tripod puts every leg through 0 at the same instant twice a cycle
+            var swing: CGFloat = 0
+            for _ in 0..<30 {
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: walkSignals)
+                swing = max(swing, fly.model.legs.map { abs($0.angle) }.max() ?? 0)
+            }
+            let gaitMoved = fly.gaitPhasePublic != phase0
+            let legsSwing = swing > 0.15
+
+            fly.state = .idle
+            fly.startFlight(bounds: bounds, effort: 0.8)
+            var lo = CGFloat.greatestFiniteMagnitude, hi = -CGFloat.greatestFiniteMagnitude
+            var i = 0
+            while i < 30 && fly.state == .flying {
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: BrainSignals())
+                let z = fly.model.foldedWings.childNodes[0].eulerAngles.z
+                lo = min(lo, z); hi = max(hi, z)
+                i += 1
+            }
+            return (gaitMoved && legsSwing && hi - lo > 0.25,
+                    String(format: "gait moved=%@ leg swing %.2f rad, wing sweep %.2f rad",
+                           gaitMoved ? "yes" : "NO", swing, hi - lo))
+        }
+    }
+    BODY_FORM = defaultForm
+
     print(failures == 0 ? "ALL BEHAVIOR TESTS PASS" : "\(failures) FAILURES")
     exit(failures == 0 ? 0 : 1)
 }
@@ -548,6 +688,13 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
     }
     func escapeTest() { enqueue { $0.loomOverride = 0.6 } }
+    func setBodyForm(_ form: BodyForm) {
+        enqueue { c in
+            guard BODY_FORM != form else { return }
+            BODY_FORM = form
+            for fly in c.flies { fly.swapBody() }
+        }
+    }
     func setMouse(_ p: CGPoint?) { lock.lock(); mouseScene = p; lock.unlock() }
 
     func setTerrain(_ ledges: [Ledge]) { enqueue { $0.terrain = ledges } }
@@ -710,6 +857,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var dataInfo = "no data — run etl.py"
     var screenFrame = NSRect.zero
     var moveDisplayItem: NSMenuItem?
+    var bodyItem: NSMenuItem?
+    var requestedBody: BodyForm = BODY_FORM
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NSScreen.main else { fatalError("no screen") }
@@ -848,6 +997,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Add Fly", #selector(addFly), "a"))
         menu.addItem(item("Remove Fly", #selector(removeFly), "r"))
         menu.addItem(item("Scare Flies", #selector(scareAll), "s"))
+        let body = item("Body: Fruit Fly", #selector(toggleBody), "y")
+        bodyItem = body
+        menu.addItem(body)
+        refreshBodyItem()
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -867,13 +1020,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func addFly() { coordinator.addFly() }
     @objc func removeFly() { coordinator.removeFly() }
     @objc func scareAll() { coordinator.scareAll() }
+    @objc func toggleBody() {
+        // BODY_FORM itself is only ever mutated on the render thread (see the
+        // threading model); the menu tracks what it asked for, for the label.
+        requestedBody = requestedBody == .beetle ? .fly : .beetle
+        coordinator.setBodyForm(requestedBody)
+        refreshBodyItem()
+    }
+    private func refreshBodyItem() {
+        // the item offers the OTHER form, so it reads as an action
+        bodyItem?.title = requestedBody == .beetle ? "Body: Fruit Fly" : "Body: Stag Beetle"
+    }
 }
 
 // MARK: - Entry point
 
 let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--snapshot") {
-    runSnapshot(path: args.count > i + 1 ? args[i + 1] : "preview.png")
+    if args.contains("--beetle") { BODY_FORM = .beetle }
+    runSnapshot(path: args.count > i + 1 ? args[i + 1] : "preview.png",
+                topDown: args.contains("--top"), flying: args.contains("--flying"))
     exit(0)
 }
 if let i = args.firstIndex(of: "--brainshot") {

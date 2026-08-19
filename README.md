@@ -74,6 +74,19 @@ mouse or keyboard.
 | Move to Next Display | hop the fly across monitors (shown when >1 display) |
 | Add / Remove Fly | extra flies (only fly #1 carries the brain) |
 | Scare Flies | startle everyone |
+| Body: Fruit Fly / Stag Beetle | swap the body geometry — behavior is unchanged |
+
+<p align="center">
+  <img src="assets/beetle.png" width="300" alt="The optional stag-beetle body">
+</p>
+
+<p align="center"><sub>
+The same connectome, the same state machine, a different shell. The behavior
+layer only ever touches the body through one struct, so a second geometry drops
+in without a line of behavior code: the elytra open when it flies or when the
+escape descending neurons fire a grounded threat posture, and the membranous
+hindwings underneath are the surfaces that actually beat.
+</sub></p>
 
 **The brain window is interactive**: hovering pauses the rotation; clicking a
 region "optogenetically" stimulates the ~60 nearest circuit neurons for
@@ -130,8 +143,10 @@ cd - && python3 etl.py /tmp/flywire
 
 ```sh
 ./DesktopFly --simtest        # circuit invariants: GF silent at rest, 4 ms loom latency, ...
-./DesktopFly --behaviortest   # 17 end-to-end checks: stimulate neurons -> body reacts
-./DesktopFly --snapshot f.png  # offscreen fly render
+./DesktopFly --behaviortest   # 22 end-to-end checks: stimulate neurons -> body reacts
+./DesktopFly --snapshot f.png  # offscreen body render (3/4 perspective)
+./DesktopFly --snapshot f.png --top [--flying] [--beetle]   # the overlay's own
+                               # top-down orthographic view, the one users see
 ./DesktopFly --brainshot b.png # offscreen brain render
 ```
 
