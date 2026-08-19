@@ -51,6 +51,14 @@ await build({
 
 await build({
   ...common,
+  entryPoints: ['src/renderer/brain.ts'],
+  outfile: 'dist/brain.js',
+  platform: 'browser',
+  format: 'iife',
+});
+
+await build({
+  ...common,
   entryPoints: ['src/cli/snapshotWindow.ts'],
   outfile: 'dist/snapshotWindow.js',
   platform: 'browser',
@@ -69,7 +77,7 @@ await build({
   external: ['electron', 'koffi'],
 });
 
-for (const f of ['index.html', 'snapshot.html']) {
+for (const f of ['index.html', 'snapshot.html', 'brain.html']) {
   await copyFile(`src/renderer/${f}`, `dist/${f}`);
 }
 console.log('bundled to dist/');

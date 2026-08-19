@@ -8,7 +8,7 @@
 import * as THREE from 'three';
 import { Coordinator, type Senses } from '../body/coordinator.ts';
 import { Arena, type SceneRect } from '../core/arena.ts';
-import { LIFSim } from '../core/sim.ts';
+import { LIFSim, SpikeBus } from '../core/sim.ts';
 import type { CircuitFile } from '../core/data.ts';
 
 interface ArenaMessage {
@@ -21,6 +21,9 @@ interface DesktopFlyBridge {
   getArena(): Promise<ArenaMessage>;
   onArena(cb: (a: ArenaMessage) => void): void;
   onSenses(cb: (s: Partial<Senses>) => void): void;
+  sendSpikes(batch: Array<{ neuron: number; isGF: boolean }>): void;
+  onStimulate(cb: (r: { indices: number[]; strength: number;
+    durationMs: number }) => void): void;
   onCommand(cb: (c: string) => void): void;
 }
 
@@ -52,7 +55,10 @@ async function main(): Promise<void> {
   // main reads data/ and sends it here: this process has no filesystem access,
   // and file:// blocks fetch()
   const circuit = await window.desktopfly.getCircuit();
-  const sim = circuit === null ? null : new LIFSim(circuit, null);
+  // The spike bus feeds the brain window. The sim stays HERE so the LC->GF
+  // escape race never crosses a process boundary.
+  const spikeBus = circuit === null ? null : new SpikeBus();
+  const sim = circuit === null ? null : new LIFSim(circuit, spikeBus);
   if (sim === null) console.warn('no data/ — running the legacy behavior path');
 
   const coordinator = new Coordinator({ bounds, sim });
@@ -109,6 +115,12 @@ async function main(): Promise<void> {
     }
   });
 
+  // A click in the brain window stimulates real neurons here.
+  window.desktopfly.onStimulate((req) => {
+    if (sim === null) return;
+    sim.stimulate(req.indices, req.strength, req.durationMs);
+  });
+
   window.desktopfly.onCommand((c) => {
     if (c === 'resetClock') {
       coordinator.resetClock();
@@ -122,12 +134,29 @@ async function main(): Promise<void> {
   });
 
   let last: number | null = null;
+  let lastSpikeSend = 0;
+  const spikeCarry: Array<{ neuron: number; isGF: boolean }> = [];
   function tick(nowMs: number): void {
     const now = nowMs / 1000;
     // The dt clamp lives in Coordinator.frame, which is unit-tested.
     const dt = last === null ? 0 : now - last;
     last = now;
     coordinator.frame(dt);
+
+    // Forward spikes to the brain window at ~30 Hz, capped: the flash pool is
+    // only 48 deep and the bus can emit thousands of events per second.
+    if (spikeBus !== null) {
+      const batch = spikeBus.popAll();
+      spikeCarry.push(...batch);
+      if (now - lastSpikeSend > 1 / 30) {
+        lastSpikeSend = now;
+        if (spikeCarry.length > 0) {
+          window.desktopfly.sendSpikes(spikeCarry.slice(-24));
+          spikeCarry.length = 0;
+        }
+      }
+    }
+
     renderer.render(coordinator.scene, camera);
     requestAnimationFrame(tick);
   }

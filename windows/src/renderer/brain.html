@@ -1,0 +1,16 @@
+<meta charset="utf-8">
+<title>Fly Brain</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #080a0f; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #label {
+    position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%);
+    font: 500 11px system-ui, sans-serif; color: #f2f2f2;
+    background: rgba(0, 0, 0, 0.55); border-radius: 6px;
+    padding: 4px 8px; white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity 0.25s;
+  }
+</style>
+<canvas id="b"></canvas>
+<div id="label"></div>
+<script src="brain.js"></script>

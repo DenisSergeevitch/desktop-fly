@@ -38,6 +38,7 @@ const capturePath = capArg === undefined
   : capArg.slice('--capture='.length);
 
 let win: BrowserWindow | null = null;
+let brainWin: BrowserWindow | null = null;
 let cursorTimer: NodeJS.Timeout | null = null;
 let windowTimer: NodeJS.Timeout | null = null;
 let cpuTimer: NodeJS.Timeout | null = null;
@@ -161,6 +162,37 @@ function createWindow(): void {
   });
 }
 
+// The brain window: an ordinary, INTERACTIVE window — unlike the overlay it must
+// receive clicks. Bottom-right of the primary work area, as main.swift:205-220
+// places its NSPanel.
+function createBrainWindow(): void {
+  const wa = screen.getPrimaryDisplay().workArea;
+  const size = { width: 340, height: 280 };
+  brainWin = new BrowserWindow({
+    x: wa.x + wa.width - size.width - 18,
+    y: wa.y + wa.height - size.height - 18,
+    width: size.width,
+    height: size.height,
+    useContentSize: true,
+    title: 'Fly Brain — FlyWire v783 (click = stimulate)',
+    backgroundColor: '#080a0f',
+    skipTaskbar: true,
+    webPreferences: {
+      preload: join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      backgroundThrottling: false,
+    },
+  });
+  brainWin.setAlwaysOnTop(true, 'floating');
+  brainWin.setMenuBarVisibility(false);
+  void brainWin.loadFile(join(__dirname, 'brain.html'));
+  brainWin.webContents.on('console-message', (e) => {
+    appendFileSync('renderer.log', `[brain ${e.level}] ${e.message}
+`);
+  });
+  brainWin.on('closed', () => { brainWin = null; });
+}
+
 function startCursorPoll(): void {
   cursorTimer = setInterval(() => {
     if (win === null || win.isDestroyed()) return;
@@ -225,6 +257,8 @@ function onDisplaysChanged(): void {
 
 app.whenReady().then(() => {
   createWindow();
+  // Shown at startup when data/ loaded, exactly as main.swift:753-757 does.
+  if (loadBrainData() !== null) createBrainWindow();
   startCursorPoll();
   startWindowPoll();
   startCpuPoll();
@@ -242,6 +276,21 @@ app.whenReady().then(() => {
   // data/ is read here, in the process that can reach the filesystem, and
   // handed over on request. Never copied or modified — it stays CC BY-NC.
   ipcMain.handle('arena', () => arenaMessage());
+
+  // Spikes: overlay (where the sim runs) -> brain window. Cosmetic, so a frame
+  // of IPC latency is fine; the escape pathway never leaves the overlay.
+  ipcMain.on('spikes', (_e, batch: unknown) => {
+    if (brainWin !== null && !brainWin.isDestroyed()) {
+      brainWin.webContents.send('spikes', batch);
+    }
+  });
+
+  // Stimulation: brain window click -> overlay -> LIFSim.stimulate.
+  ipcMain.on('stimulate', (_e, req: unknown) => {
+    if (win !== null && !win.isDestroyed()) win.webContents.send('stimulate', req);
+  });
+
+  ipcMain.handle('points', () => loadBrainData()?.points ?? null);
 
   ipcMain.handle('circuit', () => {
     const data = loadBrainData();

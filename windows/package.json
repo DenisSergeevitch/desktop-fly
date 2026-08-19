@@ -18,7 +18,8 @@
     "build": "node build.mjs",
     "start": "npm run build && electron dist/main.cjs",
     "snapshot": "npm run build && electron dist/snapshot.cjs",
-    "sensetest": "node src/cli/sensetest.ts"
+    "sensetest": "node src/cli/sensetest.ts",
+    "brainshot": "npm run build && electron dist/snapshot.cjs --brain brain.png"
   },
   "devDependencies": {
     "@types/node": "^24",

@@ -2,6 +2,19 @@
 // nothing else — the renderer never gets `require` or direct ipcRenderer access.
 import { contextBridge, ipcRenderer } from 'electron';
 
+// The brain window's bridge. Kept separate from the overlay's so neither window
+// can reach the other's channels.
+contextBridge.exposeInMainWorld('desktopflyBrain', {
+  getCircuit: () => ipcRenderer.invoke('circuit'),
+  getPoints: () => ipcRenderer.invoke('points'),
+  onSpikes: (cb: (s: unknown) => void) => {
+    ipcRenderer.on('spikes', (_e, s) => cb(s));
+  },
+  stimulate: (indices: number[], strength: number, durationMs: number) => {
+    ipcRenderer.send('stimulate', { indices, strength, durationMs });
+  },
+});
+
 contextBridge.exposeInMainWorld('desktopfly', {
   // The renderer loads over file://, where Chromium blocks fetch(), so the
   // circuit comes from main (which does have filesystem access).
@@ -15,6 +28,12 @@ contextBridge.exposeInMainWorld('desktopfly', {
   getArena: () => ipcRenderer.invoke('arena'),
   onArena: (cb: (a: unknown) => void) => {
     ipcRenderer.on('arena', (_e, a) => cb(a));
+  },
+  sendSpikes: (batch: unknown) => {
+    ipcRenderer.send('spikes', batch);
+  },
+  onStimulate: (cb: (s: unknown) => void) => {
+    ipcRenderer.on('stimulate', (_e, s) => cb(s));
   },
   onSenses: (cb: (s: unknown) => void) => {
     ipcRenderer.on('senses', (_e, s) => cb(s));
