@@ -33,7 +33,11 @@ async function main(): Promise<void> {
   });
   renderer.setClearColor(0x000000, 0);   // fully transparent clear
   renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(bounds.width, bounds.height, false);
+  // updateStyle MUST stay on (the default). With it suppressed the canvas has
+  // no CSS size, so it lays out at its drawing-buffer size — devicePixelRatio
+  // times too large — and scene coordinates stop matching screen pixels: the fly
+  // then walks out of view long before reaching its scene bounds.
+  renderer.setSize(bounds.width, bounds.height);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFShadowMap;   // PCFSoft is deprecated
 
@@ -46,6 +50,15 @@ async function main(): Promise<void> {
   const coordinator = new Coordinator({ bounds, sim });
   console.log(`overlay ready: ${bounds.width}x${bounds.height}, `
     + `sim=${sim === null ? 'none' : `${sim.n} neurons`}`);
+  // Guard the scene->pixel mapping: the canvas must occupy exactly the window
+  // in CSS pixels. If these ever diverge, the fly drifts off screen.
+  if (canvas.clientWidth !== window.innerWidth
+      || canvas.clientHeight !== window.innerHeight) {
+    console.error(`canvas/window mismatch: canvas is `
+      + `${canvas.clientWidth}x${canvas.clientHeight} CSS px in a `
+      + `${window.innerWidth}x${window.innerHeight} window — the fly will `
+      + 'appear to leave the screen');
+  }
   const camera = coordinator.scene.getObjectByName('camera') as THREE.Camera;
 
   let loggedTerrain = false;
@@ -66,7 +79,7 @@ async function main(): Promise<void> {
     if (c.startsWith('bounds:')) {
       const [w, h] = c.slice('bounds:'.length).split('x').map(Number);
       bounds = { width: w, height: h };
-      renderer.setSize(w, h, false);
+      renderer.setSize(w, h);
       coordinator.retarget(bounds);
       return;
     }

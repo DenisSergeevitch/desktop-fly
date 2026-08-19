@@ -42,6 +42,15 @@ let windowTimer: NodeJS.Timeout | null = null;
 let cpuTimer: NodeJS.Timeout | null = null;
 let displayId: number | null = null;
 
+// The fly's arena. Windows clamps a normal window to the work area anyway (the
+// overlay came out 1392 tall when asked for 1440), and the taskbar is a poor
+// place for a fly, so the work area IS the arena — used by the window bounds,
+// the cursor conversion and the terrain poll alike. macOS uses the full
+// screen.frame; this is the deliberate Windows equivalent.
+function arena(d: Electron.Display): Electron.Rectangle {
+  return d.workArea;
+}
+
 function activeDisplay(): Electron.Display {
   const all = screen.getAllDisplays();
   const found = all.find((d) => d.id === displayId);
@@ -53,9 +62,10 @@ function activeDisplay(): Electron.Display {
 // Working in DIPs makes Chromium absorb per-monitor DPI scaling, so the body
 // math keeps operating in macOS-equivalent "points".
 function toScene(p: { x: number; y: number }, d: Electron.Display) {
+  const a = arena(d);
   return {
-    x: p.x - (d.bounds.x + d.bounds.width / 2),
-    y: (d.bounds.y + d.bounds.height / 2) - p.y,
+    x: p.x - (a.x + a.width / 2),
+    y: (a.y + a.height / 2) - p.y,
   };
 }
 
@@ -63,11 +73,12 @@ function createWindow(): void {
   const d = screen.getPrimaryDisplay();
   displayId = d.id;
 
+  const a = arena(d);
   win = new BrowserWindow({
-    x: d.bounds.x,
-    y: d.bounds.y,
-    width: d.bounds.width,
-    height: d.bounds.height,
+    x: a.x,
+    y: a.y,
+    width: a.width,
+    height: a.height,
     transparent: true,       // per-pixel alpha; the desktop shows through
     frame: false,
     resizable: false,
@@ -122,8 +133,7 @@ function createWindow(): void {
   void win.loadFile(join(__dirname, 'index.html'));
 
   win.webContents.once('did-finish-load', () => {
-    win?.webContents.send('command', 'bounds:'
-      + `${d.bounds.width}x${d.bounds.height}`);
+    win?.webContents.send('command', `bounds:${a.width}x${a.height}`);
   });
 }
 
@@ -160,7 +170,7 @@ function startWindowPoll(): void {
   windowTimer = setInterval(() => {
     if (win === null || win.isDestroyed()) return;
     const d = activeDisplay();
-    const snap = terrain.poll(enumerateWindows(d.scaleFactor), d.bounds);
+    const snap = terrain.poll(enumerateWindows(d.scaleFactor), arena(d));
     win.webContents.send('senses', {
       ledges: snap.ledges,
       newWindows: snap.newWindows,
@@ -179,8 +189,9 @@ function startCpuPoll(): void {
 function placeOnActiveDisplay(): void {
   if (win === null || win.isDestroyed()) return;
   const d = activeDisplay();
-  win.setBounds(d.bounds);
-  win.webContents.send('command', `bounds:${d.bounds.width}x${d.bounds.height}`);
+  const a = arena(d);
+  win.setBounds(a);
+  win.webContents.send('command', `bounds:${a.width}x${a.height}`);
 }
 
 app.whenReady().then(() => {

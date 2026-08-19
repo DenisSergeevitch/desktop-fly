@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import * as THREE from 'three';
 import { loadBrainData } from '../core/data.ts';
 import { LIFSim } from '../core/sim.ts';
 import { Coordinator } from './coordinator.ts';
@@ -194,4 +195,26 @@ test('a frame hitch cannot make the sim run away', () => {
   const before = c.sim!.simMs;
   c.frame(2.0);                    // a 2-second stall
   assert.ok(c.sim!.simMs - before <= 50, `stepped ${c.sim!.simMs - before} ms`);
+});
+
+test('the camera extents match the bounds, and follow a retarget', () => {
+  // The scene->pixel mapping depends on this: the orthographic half-extents must
+  // equal the display size in DIPs, or scene coordinates and screen pixels drift
+  // apart and the fly appears to leave the screen. (Renderer-side, the canvas
+  // CSS size must equal the window size for the same reason — guarded at
+  // startup in renderer/overlay.ts, which no headless test can reach.)
+  const c = makeCoordinator();
+  const cam = c.scene.getObjectByName('camera') as THREE.OrthographicCamera;
+  assert.equal(cam.left, -BOUNDS.width / 2);
+  assert.equal(cam.right, BOUNDS.width / 2);
+  assert.equal(cam.top, BOUNDS.height / 2);
+  assert.equal(cam.bottom, -BOUNDS.height / 2);
+
+  c.retarget({ width: 800, height: 600 });
+  c.frame(0);
+  assert.equal(cam.left, -400);
+  assert.equal(cam.right, 400);
+  assert.equal(cam.top, 300);
+  assert.equal(cam.bottom, -300);
+  assert.equal(c.bounds.width, 800);
 });
