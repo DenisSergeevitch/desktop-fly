@@ -1701,9 +1701,15 @@ git commit -m "Windows port M1: document the port's status and commands"
 - [ ] `cd windows && node --test` — all tests pass
 - [ ] `npm run datatest` — exit 0
 - [ ] `npm run simtest:strict` — exit 0 at seeds 1, 2, and 3
-- [ ] `npx tsc --noEmit` type-checks clean (needs a one-off `npx`; skip if
-      offline — Node strips types at runtime regardless)
-- [ ] No npm dependencies added
+- [ ] `npm install && npm run typecheck` clean. NOTE: this conflicted with the
+      zero-dependency constraint as originally written — every error tsc reports
+      without `@types/node` is caused by its absence, including the ones that
+      look independent (`'data' is possibly null` needs `process.exit`'s `never`
+      return type and `assert`'s assertion signature). Resolved by declaring
+      `@types/node` and `typescript` as **devDependencies**: running the sim and
+      all three suites still needs zero installs, which was the constraint's
+      actual purpose. Verified clean with types present.
+- [ ] No *runtime* npm dependencies added
 - [ ] `data/` unmodified (`git status` clean for `data/`)
 - [ ] The measured spontaneous/behavior rates are recorded in a commit message
 

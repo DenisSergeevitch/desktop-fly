@@ -8,7 +8,14 @@ and its diagnostics run under Node.
 
 ## Requirements
 
-Node >= 24 (for native TypeScript type stripping). No dependencies.
+Node >= 24 (for native TypeScript type stripping). **Running the sim and its
+suites needs nothing installed** — no npm install, no compiler.
+
+Type-checking is the one optional extra, since it needs `@types/node`:
+
+```sh
+npm install && npm run typecheck    # dev-only; verified clean
+```
 
 ## Commands
 
