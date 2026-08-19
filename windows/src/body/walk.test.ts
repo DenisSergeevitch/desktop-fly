@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Fly } from './fly.ts';
+import { Fly, asFlyState } from './fly.ts';
 import { defaultSignals, type Ledge } from '../core/types.ts';
 
 const BOUNDS = { width: 1512, height: 982 };
@@ -15,7 +15,7 @@ function walkSignals() {
 test('the fly attaches to a window edge and follows it', () => {
   // main.swift:316-325
   const fly = new Fly({ x: 0, y: -55 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 30;
   fly.heading = 0;
   fly.terrain = [{ y: -40, x0: -300, x1: 300, id: 1 }];
@@ -33,7 +33,7 @@ test('the fly attaches to a window edge and follows it', () => {
 test('a window closing underfoot launches a flight', () => {
   // main.swift:327-338
   const fly = new Fly({ x: 0, y: -40 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 25;
   fly.heading = 0;
   const L: Ledge = { y: -40, x0: -300, x1: 300, id: 1 };
@@ -53,7 +53,7 @@ test('a window closing underfoot launches a flight', () => {
 
 test('walking along a ledge stays within its x range', () => {
   const fly = new Fly({ x: 0, y: -40 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 120;
   fly.heading = 0;
   const L: Ledge = { y: -40, x0: -100, x1: 100, id: 7 };
@@ -69,7 +69,7 @@ test('walking along a ledge stays within its x range', () => {
 
 test('a dragged window carries the fly with it', () => {
   const fly = new Fly({ x: 0, y: -40 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 10;
   fly.heading = 0;
   fly.terrain = [{ y: -40, x0: -300, x1: 300, id: 3 }];
@@ -83,7 +83,7 @@ test('a dragged window carries the fly with it', () => {
 
 test('free walking stays inside the screen bounds', () => {
   const fly = new Fly({ x: 700, y: 450 }, 3);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 150;
   fly.heading = 0.4;                 // aimed at the corner
   for (let i = 0; i < 900; i++) {
@@ -98,7 +98,7 @@ test('free walking stays inside the screen bounds', () => {
 
 test('backward walking moves opposite the heading', () => {
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 40;
   fly.heading = 0;                   // facing +x
   fly.backwardTimer = 0.5;
@@ -109,7 +109,7 @@ test('backward walking moves opposite the heading', () => {
 
 test('the gait bobs the body vertically while walking', () => {
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 60;
   fly.heading = 0;
   let lo = Infinity;

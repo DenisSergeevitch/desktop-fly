@@ -15,6 +15,12 @@ import type { BrainSignals, Ledge } from '../core/types.ts';
 
 export type FlyState = 'walking' | 'idle' | 'grooming' | 'flying' | 'sleeping';
 
+// TypeScript narrows `fly.state = 'idle'` to that literal and cannot see that
+// update() reassigns it, so every later comparison looks impossible (TS2367).
+// Assigning through this identity helper keeps the declared union type. Only
+// tests and the diagnostic CLIs need it; app code drives state via signals.
+export const asFlyState = (s: FlyState): FlyState => s;
+
 export interface Point {
   x: number;
   y: number;
@@ -254,7 +260,10 @@ export class Fly {
           this.scareCooldown = 1.0;
         }
       }
-      if (this.state !== 'flying') {
+      // read through a widened local: TS cannot see that startFlight() above
+      // may have set state to 'flying'
+      const grounded = asFlyState(this.state);
+      if (grounded !== 'flying') {
         this.stateTimer -= dt;
         if (this.stateTimer <= 0) {
           if (this.state === 'walking' && rnd(this.rng, 0, 1) < 0.10) {

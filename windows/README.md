@@ -3,31 +3,49 @@
 Windows port of DesktopFly. The brain is the same: the same `data/` files, the
 same 668-neuron FlyWire v783 circuit, the same 1 kHz LIF dynamics.
 
-**Status: M1 — core sim, headless.** No window and no fly yet; the simulation
-and its diagnostics run under Node.
+**Status: M2a — body, headless.** The fly is fully alive — it walks, grooms,
+darts, takes off, flies, lands, sleeps, and rides window edges — but nothing is
+drawn yet. The overlay window is M2b.
 
 ## Requirements
 
-Node >= 24 (for native TypeScript type stripping). **Running the sim and its
-suites needs nothing installed** — no npm install, no compiler.
+Node >= 24 (for native TypeScript type stripping) and `npm install`.
 
-Type-checking is the one optional extra, since it needs `@types/node`:
-
-```sh
-npm install && npm run typecheck    # dev-only; verified clean
-```
+`three` is a runtime dependency as of M2a — the fly's body is a Three.js scene
+graph, built without a renderer so it works headless. (M1's zero-install
+property covered the sim alone.)
 
 ## Commands
 
 ```sh
 cd windows
-node --test               # unit tests (30)
+node --test               # unit tests (64)
 npm run datatest          # data invariants (668 neurons / 18,968 edges / 23,210 points)
 npm run simtest           # circuit diagnostics, Swift-parity exit conditions
 npm run simtest:strict    # also asserts the ranges the Swift suite only prints
+npm run behaviortest      # 17 end-to-end checks: stimulate neurons -> body reacts
+npm run typecheck         # tsc --noEmit
 ```
 
-`--seed=N` picks the RNG seed for either simtest variant (default 1).
+`--seed=N` picks the RNG seed for any of the three suites (default 1).
+
+## The body
+
+`src/body/` is a transliteration of `FlyModel.swift`: procedural geometry
+(thorax, abdomen with banded texture, head, eyes, antennae, proboscis, six
+three-segment capsule legs, extruded wings, wing-blur discs) plus the `Fly`
+behavior — tripod gait, ledge walking, flight with an effort-scaled altitude
+curve and a flare landing, grooming, sleep, and `brainBehavior`, where every
+decision reads a real neuron population's rate.
+
+Because Three.js builds scene graphs without a WebGL context, all 17 behavior
+checks assert on real `Object3D` transforms under plain Node — no rendering, no
+screenshots, no GPU.
+
+**Not yet verified:** how the fly *looks*. The geometry is numerically faithful
+to the Swift source, but nothing has been rendered, so any visual discrepancy
+against `assets/fly.png` is still unknown. Expect the legs and wings to need
+tuning once M2b can draw them.
 
 ## Verified against the macOS build's documented invariants
 

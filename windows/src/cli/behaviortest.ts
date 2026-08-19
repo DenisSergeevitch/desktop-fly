@@ -10,7 +10,7 @@ import { LIFSim } from '../core/sim.ts';
 import { SignalBuilder } from '../core/signals.ts';
 import { circadianActivity } from '../core/circadian.ts';
 import { defaultSignals, type Ledge } from '../core/types.ts';
-import { Fly } from '../body/fly.ts';
+import { Fly, asFlyState } from '../body/fly.ts';
 import { FLY_SCALE } from '../body/constants.ts';
 
 const seedArg = process.argv.find((a) => a.startsWith('--seed='));
@@ -37,7 +37,7 @@ function scenario(
   const sim = new LIFSim(data!.circuit, null, SEED);
   const builder = new SignalBuilder();
   const fly = new Fly({ x: 0, y: 0 }, SEED);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.speed = 0;
   setup?.(fly);
   // settle the network, drain any startup GF latch
@@ -86,7 +86,7 @@ scenario('DNa-left stim -> left (CCW) turn while walking',
   (f) => f.heading - heading0 > 0.25,
   (f) => `heading change ${(f.heading - heading0).toFixed(2)} rad`,
   (f) => {
-    f.state = 'walking';
+    f.state = asFlyState('walking');
     f.speed = 30;
     f.heading = 0;
     heading0 = 0;
@@ -120,7 +120,7 @@ function walkSignals() {
 
 bodyCheck('ledge attach + follow window edge', () => {
   const fly = new Fly({ x: 0, y: -55 }, SEED);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 30;
   fly.heading = 0;
   fly.terrain = [{ y: -40, x0: -300, x1: 300, id: 1 }];
@@ -136,7 +136,7 @@ bodyCheck('ledge attach + follow window edge', () => {
 
 bodyCheck('window closes underfoot -> takeoff', () => {
   const fly = new Fly({ x: 0, y: -40 }, SEED);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 25;
   fly.heading = 0;
   const L: Ledge = { y: -40, x0: -300, x1: 300, id: 1 };
@@ -152,19 +152,20 @@ bodyCheck('window closes underfoot -> takeoff', () => {
 
 bodyCheck('sleep signal -> sleeping; wake -> grooming', () => {
   const fly = new Fly({ x: 0, y: 0 }, SEED);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   const s = defaultSignals();
   s.sleep = true;
   for (let i = 0; i < 60; i++) fly.update(DT, BOUNDS, null, s);
   if (fly.state !== 'sleeping') return [false, `no sleep: ${fly.state}`];
   s.sleep = false;
   fly.update(DT, BOUNDS, null, s);
-  return [fly.state === 'grooming', `woke to ${fly.state}`];
+  const woke = asFlyState(fly.state);
+  return [woke === 'grooming', `woke to ${woke}`];
 });
 
 bodyCheck('thermal tempo scales walking speed', () => {
   const fly = new Fly({ x: 0, y: 0 }, SEED);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 20;
   fly.heading = 0;
   const cool = walkSignals();
@@ -182,7 +183,7 @@ bodyCheck('thermal tempo scales walking speed', () => {
 bodyCheck('flight: altitude drives scale; escape flies higher than casual', () => {
   function flight(escape: boolean, effort?: number) {
     const fly = new Fly({ x: 0, y: 0 }, SEED);
-    fly.state = 'idle';
+    fly.state = asFlyState('idle');
     fly.startFlight({ bounds: BOUNDS, escape, effort });
     let maxAlt = 0;
     let maxScale = 0;
@@ -205,7 +206,7 @@ bodyCheck('flight: altitude drives scale; escape flies higher than casual', () =
 
 bodyCheck('flight: wings actually beat', () => {
   const fly = new Fly({ x: 0, y: 0 }, SEED);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.startFlight({ bounds: BOUNDS, effort: 0.8 });
   let lo = Infinity;
   let hi = -Infinity;
@@ -220,7 +221,7 @@ bodyCheck('flight: wings actually beat', () => {
 
 bodyCheck('escape-DN activity mid-flight raises wing-beat effort', () => {
   const fly = new Fly({ x: 0, y: 0 }, SEED);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.startFlight({ bounds: BOUNDS, effort: 0.5 });
   for (let i = 0; i < 12; i++) fly.update(DT, BOUNDS, null, defaultSignals());
   const calmEffort = fly.effortCurrent;
@@ -236,7 +237,7 @@ bodyCheck('escape-DN activity mid-flight raises wing-beat effort', () => {
 
 bodyCheck('threat while grounded raises the wings (no takeoff)', () => {
   const fly = new Fly({ x: 0, y: 0 }, SEED);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 20;
   fly.dartCooldown = 99;   // isolate the posture from darting
   const threat = defaultSignals();
@@ -250,7 +251,7 @@ bodyCheck('threat while grounded raises the wings (no takeoff)', () => {
 
 bodyCheck('landing is smooth: no scale/height snap at touchdown', () => {
   const fly = new Fly({ x: 0, y: 0 }, SEED);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.startFlight({ bounds: BOUNDS, escape: true });
   let prevScale = fly.node.scale.x;
   let prevZ = fly.node.position.z;

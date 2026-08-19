@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Fly } from './fly.ts';
+import { Fly, asFlyState } from './fly.ts';
 import { defaultSignals } from '../core/types.ts';
 
 const BOUNDS = { width: 1512, height: 982 };
@@ -20,7 +20,7 @@ test('a GF spike takes off immediately, even out of sleep', () => {
 test('sleep holds the fly still and waking triggers grooming', () => {
   // main.swift:340-349
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   const s = defaultSignals();
   s.sleep = true;
   for (let i = 0; i < 60; i++) fly.update(DT, BOUNDS, null, s);
@@ -33,7 +33,7 @@ test('sleep holds the fly still and waking triggers grooming', () => {
 
 test('walk drive starts and stops walking with hysteresis', () => {
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.speed = 0;
   const go = defaultSignals();
   go.walkDrive = 0.6;
@@ -50,7 +50,7 @@ test('walk drive starts and stops walking with hysteresis', () => {
 
 test('groom drive has a dead band between 0.3 and 0.5', () => {
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   const mid = defaultSignals();
   mid.groomDrive = 0.4;              // inside the dead band: no change
   for (let i = 0; i < 120; i++) fly.update(DT, BOUNDS, null, mid);
@@ -70,7 +70,7 @@ test('groom drive has a dead band between 0.3 and 0.5', () => {
 test('tempo scales walking speed', () => {
   // main.swift:351-362
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 20;
   fly.heading = 0;
   const cool = defaultSignals();
@@ -88,7 +88,7 @@ test('tempo scales walking speed', () => {
 
 test('a hot looming population darts the fly away from the cursor', () => {
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   const s = defaultSignals();
   s.nervous = 0.8;
   fly.update(DT, BOUNDS, { x: 100, y: 0 }, s);
@@ -112,7 +112,7 @@ test('MDN backward bursts fire from every grounded state', () => {
 
 test('turnBias steers while walking but not while on a ledge', () => {
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 30;
   fly.heading = 0;
   const s = defaultSignals();
@@ -122,7 +122,7 @@ test('turnBias steers while walking but not while on a ledge', () => {
   assert.ok(fly.heading > 0.25, `heading change ${fly.heading} rad`);
 
   const onLedge = new Fly({ x: 0, y: -40 }, 1);
-  onLedge.state = 'walking';
+  onLedge.state = asFlyState('walking');
   onLedge.speed = 30;
   onLedge.heading = 0;
   onLedge.terrain = [{ y: -40, x0: -300, x1: 300, id: 1 }];
@@ -134,7 +134,7 @@ test('turnBias steers while walking but not while on a ledge', () => {
 
 test('high arousal makes spontaneous takeoff likely', () => {
   const fly = new Fly({ x: 0, y: 0 }, 5);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 40;
   const s = defaultSignals();
   s.walkDrive = 0.6;

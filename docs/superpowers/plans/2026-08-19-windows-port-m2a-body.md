@@ -1040,6 +1040,8 @@ git commit -m "Windows port M2a: document the body port"
 - [ ] `npm run simtest:strict` still exits 0 (no M1 regression)
 - [ ] `npm install && npm run typecheck` clean
 - [ ] `three` is the only runtime dependency added; `package-lock.json` committed
+      (`@types/three` was also needed as a devDependency — `three` ships no
+      bundled declarations, so `typecheck` cannot pass without it)
 - [ ] `data/` unmodified
 
 ## Next

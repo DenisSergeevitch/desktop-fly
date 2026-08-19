@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Fly } from './fly.ts';
+import { Fly, asFlyState } from './fly.ts';
 import { FLY_SCALE } from './constants.ts';
 import { defaultSignals } from '../core/types.ts';
 
@@ -11,7 +11,7 @@ test('altitude drives scale; escape flies higher than casual', () => {
   // main.swift:364-385
   function flight(escape: boolean, effort?: number) {
     const fly = new Fly({ x: 0, y: 0 }, 1);
-    fly.state = 'idle';
+    fly.state = asFlyState('idle');
     fly.startFlight({ bounds: BOUNDS, escape, effort });
     let maxAlt = 0;
     let maxScale = 0;
@@ -36,7 +36,7 @@ test('altitude drives scale; escape flies higher than casual', () => {
 test('wings actually beat in flight', () => {
   // main.swift:387-398
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.startFlight({ bounds: BOUNDS, effort: 0.8 });
   let lo = Infinity;
   let hi = -Infinity;
@@ -52,7 +52,7 @@ test('wings actually beat in flight', () => {
 test('escape-DN activity mid-flight raises wing-beat effort', () => {
   // main.swift:400-414 — live modifiers must never weaken takeoff
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.startFlight({ bounds: BOUNDS, effort: 0.5 });
   for (let i = 0; i < 12; i++) fly.update(DT, BOUNDS, null, defaultSignals());
   const calm = fly.effortCurrent;
@@ -69,7 +69,7 @@ test('escape-DN activity mid-flight raises wing-beat effort', () => {
 test('threat while grounded raises the wings without taking off', () => {
   // main.swift:416-425
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 20;
   fly.dartCooldown = 99;            // isolate the posture from darting
   const threat = defaultSignals();
@@ -85,7 +85,7 @@ test('threat while grounded raises the wings without taking off', () => {
 test('landing is smooth: no scale or height snap at touchdown', () => {
   // main.swift:427-446 — landing must go through the flare, never snap
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.startFlight({ bounds: BOUNDS, escape: true });
   let prevScale = fly.node.scale.x;
   let prevZ = fly.node.position.z;
@@ -113,7 +113,7 @@ test('landing is smooth: no scale or height snap at touchdown', () => {
 
 test('landing refolds the wings and hides the blur discs', () => {
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'idle';
+  fly.state = asFlyState('idle');
   fly.startFlight({ bounds: BOUNDS, escape: true });
   assert.equal(fly.model.blurWingL.visible, true);
   let frames = 0;
@@ -134,7 +134,7 @@ test('legacy path: no signals means mouse-distance fear', () => {
   // Extra, brainless flies (FlyModel.swift:405-427). A cursor inside
   // SCARE_RADIUS must launch a flight.
   const fly = new Fly({ x: 0, y: 0 }, 1);
-  fly.state = 'walking';
+  fly.state = asFlyState('walking');
   fly.speed = 30;
   fly.update(DT, BOUNDS, { x: 40, y: 0 }, null);
   assert.equal(fly.state, 'flying');

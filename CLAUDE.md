@@ -18,7 +18,7 @@ SceneKit; the brain data is real.
 | `Environment.swift` | permission-free senses: `WindowSense` (ledges/looms), circadian curve, user idle, thermal tempo |
 | `etl.py` | raw Codex dumps → `data/brain_points.json` + `data/circuit.json` |
 | `data/` | shipped derived data (CC BY-NC 4.0 — see `data/DATA_LICENSE.md`) |
-| `windows/` | Electron + TypeScript + Three.js port; `src/core` is the sim transliterated from `Sim.swift` (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
+| `windows/` | Electron + TypeScript + Three.js port: `src/core` is the sim (from `Sim.swift`), `src/body` the procedural body + `Fly` behavior (from `FlyModel.swift`), `src/cli` the suites (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
 
 ## Build, run, verify
 
@@ -50,7 +50,8 @@ in them. `--behaviortest` is 17 hard checks (7 stimulate-the-sim scenarios +
 (Cocoa/SceneKit, bare `swiftc`, macOS 13+) and cannot be built or tested on
 Windows — say so plainly rather than implying its suites passed. The `windows/`
 subtree is the Electron/TypeScript port and IS verifiable here:
-`cd windows && node --test && npm run simtest:strict`. `etl.py` and the
+`cd windows && node --test && npm run simtest:strict && npm run behaviortest`.
+`etl.py` and the
 `data/*.json` invariants are checkable on either platform.
 
 **Caveat on the walk-duty invariant**: "walk-drive duty 20–50%" is a typical
