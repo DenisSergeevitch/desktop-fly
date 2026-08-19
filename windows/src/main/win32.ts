@@ -11,6 +11,7 @@
 
 import koffiRaw from 'koffi';
 import type { RawWindow } from '../core/windowTerrain.ts';
+import type { ScreenRect } from '../core/arena.ts';
 
 // koffi 3.1 ships an incomplete index.d.ts: `proto`, `register`, `unregister`
 // and `address` all exist at runtime (verified against Object.keys) but are not
@@ -36,6 +37,9 @@ const DWMWA_CLOAKED = 14;
 const VK_LBUTTON = 0x01;
 
 interface Bindings {
+  EnumDisplayMonitors: KoffiFn;
+  GetMonitorInfoW: KoffiFn;
+  MonitorEnumProc: unknown;
   EnumWindows: KoffiFn;
   IsWindowVisible: KoffiFn;
   GetWindowRect: KoffiFn;
@@ -72,6 +76,14 @@ function load(): Bindings | null {
       left: 'long', top: 'long', right: 'long', bottom: 'long',
     });
     koffi.struct('LASTINPUTINFO', { cbSize: 'uint32', dwTime: 'uint32' });
+    koffi.struct('MONITORINFO', {
+      cbSize: 'uint32',
+      rcMonitor: 'RECT',
+      rcWork: 'RECT',
+      dwFlags: 'uint32',
+    });
+    const MonitorEnumProc = koffi.pointer(koffi.proto(
+      'bool MonitorEnumProc(void *monitor, void *hdc, RECT *rect, intptr data)'));
     // koffi.register() wants a POINTER to the prototype; handing it the bare
     // proto fails with "expected <callback> * type". Verified both forms.
     const EnumWindowsProc = koffi.pointer(
@@ -90,6 +102,11 @@ function load(): Bindings | null {
       GetLastInputInfo: user32.func('bool GetLastInputInfo(_Inout_ LASTINPUTINFO *info)'),
       GetAsyncKeyState: user32.func('int16 GetAsyncKeyState(int key)'),
       GetTickCount: kernel32.func('uint32 GetTickCount()'),
+      EnumDisplayMonitors: user32.func(
+        'bool EnumDisplayMonitors(void *hdc, RECT *clip, MonitorEnumProc *cb, intptr data)'),
+      GetMonitorInfoW: user32.func(
+        'bool GetMonitorInfoW(void *monitor, _Inout_ MONITORINFO *info)'),
+      MonitorEnumProc,
       EnumWindowsProc,
     };
     return bindings;
@@ -141,6 +158,49 @@ export function leftButtonClicked(): boolean {
     note('GetAsyncKeyState', e);
     return false;
   }
+}
+
+// Every monitor's WORK area (desktop minus taskbar), in physical pixels — the
+// same rectangles Electron's screen.getAllDisplays() reports, for callers that
+// have no Electron (the sensetest CLI). Never hardcode a display size: this
+// machine alone has two monitors of different sizes, scales and vertical offset.
+export function monitorWorkAreas(): ScreenRect[] {
+  const b = load();
+  if (b === null) return [];
+  const out: ScreenRect[] = [];
+  try {
+    const cb = koffi.register((monitor: unknown): boolean => {
+      try {
+        const info = {
+          cbSize: 40,
+          rcMonitor: { left: 0, top: 0, right: 0, bottom: 0 },
+          rcWork: { left: 0, top: 0, right: 0, bottom: 0 },
+          dwFlags: 0,
+        };
+        const ok = (b.GetMonitorInfoW as (m: unknown, i: unknown) => boolean)(monitor, info);
+        if (ok) {
+          const w = info.rcWork;
+          out.push({
+            x: w.left, y: w.top,
+            width: w.right - w.left, height: w.bottom - w.top,
+          });
+        }
+      } catch {
+        // skip a monitor we cannot query rather than losing the whole list
+      }
+      return true;
+    }, b.MonitorEnumProc);
+    try {
+      (b.EnumDisplayMonitors as
+        (h: unknown, c: unknown, cb: unknown, d: number) => boolean)(null, null, cb, 0);
+    } finally {
+      koffi.unregister(cb);
+    }
+  } catch (e) {
+    note('EnumDisplayMonitors', e);
+    return [];
+  }
+  return out;
 }
 
 // `scale` converts physical pixels (what Win32 reports) into DIPs (what the rest
