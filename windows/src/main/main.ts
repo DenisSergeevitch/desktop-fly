@@ -82,8 +82,11 @@ function createWindow(): void {
   // Windows gives a GUI Electron process no usable stdout, so renderer
   // diagnostics go to a file. Without this a renderer exception is completely
   // silent and looks like a hung window.
-  win.webContents.on('console-message', (_e, level, message, line, src) => {
-    appendFileSync('renderer.log', `[${level}] ${message} (${src}:${line})
+  win.webContents.on('console-message', (e) => {
+    // Event-object form: the positional (event, level, message, line, source)
+    // signature is deprecated as of Electron 43.
+    appendFileSync('renderer.log',
+      `[${e.level}] ${e.message} (${e.sourceId}:${e.lineNumber})
 `);
   });
   win.webContents.on('render-process-gone', (_e, details) => {

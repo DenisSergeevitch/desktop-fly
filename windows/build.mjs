@@ -5,12 +5,13 @@ import { copyFile, mkdir } from 'node:fs/promises';
 
 const common = { bundle: true, sourcemap: true, logLevel: 'info', target: 'es2023' };
 
-// EXPECTED WARNING: the cjs builds report `"import.meta" is not available with
-// the "cjs" output format and will be empty`. That is exactly the case
-// core/data.ts guards for — it falls back to __dirname when import.meta.url is
-// absent, so the same file works under Node ESM (tests, CLIs) and inside this
-// CommonJS bundle. Not a bug; do not "fix" it by switching the format, which
-// Electron's main process cannot load.
+// core/data.ts has to run under Node ESM (tests, CLIs) and inside these
+// CommonJS bundles, so it probes `import.meta.url` and falls back to __dirname.
+// esbuild cannot express import.meta in cjs output and warns about it on every
+// build; substituting an empty object resolves the probe at build time, keeping
+// the fallback behaviour and silencing the noise. Do NOT "fix" this by emitting
+// esm instead — Electron's main process cannot load an ESM entry point.
+const cjs = { format: 'cjs', platform: 'node', define: { 'import.meta': '{}' } };
 
 await mkdir('dist', { recursive: true });
 
@@ -19,8 +20,7 @@ await build({
   ...common,
   entryPoints: ['src/main/main.ts'],
   outfile: 'dist/main.cjs',
-  platform: 'node',
-  format: 'cjs',
+  ...cjs,
   external: ['electron'],
 });
 
@@ -28,8 +28,7 @@ await build({
   ...common,
   entryPoints: ['src/renderer/preload.ts'],
   outfile: 'dist/preload.cjs',
-  platform: 'node',
-  format: 'cjs',
+  ...cjs,
   external: ['electron'],
 });
 
@@ -54,8 +53,7 @@ await build({
   ...common,
   entryPoints: ['src/cli/snapshot.ts'],
   outfile: 'dist/snapshot.cjs',
-  platform: 'node',
-  format: 'cjs',
+  ...cjs,
   external: ['electron'],
 });
 

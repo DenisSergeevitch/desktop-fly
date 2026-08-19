@@ -12,9 +12,17 @@ come (M3 and M5), so for now quit with Ctrl+C in the launching terminal.
 
 Node >= 24 (for native TypeScript type stripping) and `npm install`.
 
-Runtime dependencies: `three` (M2a) and `electron` (M2b). If npm's script policy
-blocks Electron's postinstall, its binary will be missing; fetch it with
-`node node_modules/electron/install.js`.
+Runtime dependencies: `three` (M2a) and `electron` (M2b).
+
+**On npm's `allow-scripts` warnings.** If your npm blocks package install
+scripts, the two dependencies behave differently:
+
+- **`electron` genuinely needs its postinstall** — that step downloads the
+  ~360 MB Chromium binary. Without it `dist/electron.exe` is missing and nothing
+  runs. Fetch it explicitly with `node node_modules/electron/install.js`.
+- **`esbuild`'s warning is safe to ignore.** Its Windows binary ships inside the
+  `@esbuild/win32-x64` package, so `npm run build` works with the postinstall
+  still unapproved. Approving it is optional.
 
 ## Commands
 
