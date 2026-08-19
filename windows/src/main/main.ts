@@ -176,15 +176,27 @@ function createBrainWindow(): void {
     useContentSize: true,
     title: 'Fly Brain — FlyWire v783 (click = stimulate)',
     backgroundColor: '#080a0f',
-    skipTaskbar: true,
+    // DEVIATION from macOS, which uses a Dock-less NSPanel. On Windows a window
+    // with no taskbar button and no tray entry is unrecoverable once anything
+    // buries it — Windows demotes topmost windows for full-screen apps, and
+    // there is then nothing to click. The taskbar button is the way back.
+    skipTaskbar: false,
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       backgroundThrottling: false,
     },
   });
-  brainWin.setAlwaysOnTop(true, 'floating');
+  // Same always-on-top band as the overlay. With the brain at 'floating' and the
+  // overlay at 'screen-saver', the full-screen overlay sat permanently ABOVE the
+  // brain window; macOS puts both at .floating for the same reason. Measured on
+  // this machine: 31 windows already claim topmost, so the band is crowded and
+  // relative order shifts — hence the explicit raise on focus below.
+  brainWin.setAlwaysOnTop(true, 'screen-saver');
   brainWin.setMenuBarVisibility(false);
+
+  // Clicking the window must bring it forward within the topmost band.
+  brainWin.on('focus', () => brainWin?.moveTop());
   void brainWin.loadFile(join(__dirname, 'brain.html'));
   brainWin.webContents.on('console-message', (e) => {
     appendFileSync('renderer.log', `[brain ${e.level}] ${e.message}
@@ -221,9 +233,22 @@ function startCursorPoll(): void {
   }, Math.round(1000 / CURSOR_HZ));
 }
 
+// Windows silently demotes topmost windows in some situations (a full-screen
+// app taking over, certain shell events). Nothing notifies us, so re-assert on
+// the existing poll rather than adding a timer.
+function reassertAlwaysOnTop(): void {
+  if (win !== null && !win.isDestroyed() && !win.isAlwaysOnTop()) {
+    win.setAlwaysOnTop(true, 'screen-saver');
+  }
+  if (brainWin !== null && !brainWin.isDestroyed() && !brainWin.isAlwaysOnTop()) {
+    brainWin.setAlwaysOnTop(true, 'screen-saver');
+  }
+}
+
 // main.swift:780-792 — window terrain plus looms from newly appeared windows
 function startWindowPoll(): void {
   windowTimer = setInterval(() => {
+    reassertAlwaysOnTop();
     if (win === null || win.isDestroyed()) return;
     const box = arenaBox();
     // GetWindowRect returns PHYSICAL pixels. With per-monitor scaling (150% and
