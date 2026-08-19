@@ -3,13 +3,12 @@
 Windows port of DesktopFly. The brain is the same: the same `data/` files, the
 same 668-neuron FlyWire v783 circuit, the same 1 kHz LIF dynamics.
 
-**Status: M4 — the brain is visible.** A transparent, click-through,
-always-on-top overlay spanning every monitor; your cursor is a real looming
-stimulus into the LC4/LPLC2 population; your window title bars are walkable
-ledges; going idle at night puts it to sleep; clicks are substrate taps; a busy
-PC makes it faster; and a second window shows the actual brain, with live spikes
-and click-to-stimulate. The tray menu is still to come (M5), so quit with Ctrl+C
-in the launching terminal.
+**Status: M5 — feature parity with the macOS build.** A transparent,
+click-through, always-on-top overlay spanning every monitor; your cursor is a
+real looming stimulus into the LC4/LPLC2 population; your window title bars are
+walkable ledges; going idle at night puts it to sleep; clicks are substrate taps;
+a busy PC makes it faster; a second window shows the actual brain with live
+spikes and click-to-stimulate; and a tray menu controls all of it.
 
 ## Requirements
 
@@ -31,7 +30,7 @@ scripts, the two dependencies behave differently:
 
 ```sh
 cd windows
-node --test               # unit tests (141)
+node --test               # unit tests (146)
 npm run datatest          # data invariants (668 neurons / 18,968 edges / 23,210 points)
 npm run simtest           # circuit diagnostics, Swift-parity exit conditions
 npm run simtest:strict    # also asserts the ranges the Swift suite only prints
@@ -42,6 +41,7 @@ npm start                 # the overlay: a fly on your desktop (Ctrl+C to quit)
 npm run snapshot          # offscreen fly render -> fly.png
 npm run brainshot         # offscreen brain render -> brain.png
 npm run sensetest         # what the Win32 senses see on this machine
+npm run dist              # package to release/win-unpacked/DesktopFly.exe
 ```
 
 To check the overlay without watching the screen — useful on a remote or
@@ -106,6 +106,44 @@ Getting there required fixing a colour-space bug that no test could see —
 `THREE.Color(r, g, b)` interprets its arguments in the linear working space,
 while the Swift source specifies sRGB via `NSColor(calibratedRed:)`. Passing
 sRGB numbers through as linear washed the entire fly out.
+
+## The tray menu
+
+A 🪰 icon appears in the notification area. Left-click toggles the brain window;
+right-click opens the menu:
+
+| item | effect |
+|---|---|
+| Pause / Resume | freezes the sim and the body; resuming does not jump |
+| Show/Hide Brain | toggles the brain window, re-creating it if you closed it |
+| Escape Test (loom) | injects a looming stimulus; watch the giant fiber fire |
+| Add / Remove Fly | extra flies (only fly #1 carries the brain) |
+| Scare Flies | startles everyone |
+| Quit | exits |
+
+Three deliberate differences from the macOS menu:
+
+- **No "Move to Next Display".** macOS keeps the fly on one screen and hops on
+  command; here the overlay spans every display, so the fly already roams all of
+  them and the item would do nothing.
+- **A drawn icon rather than an emoji.** macOS sets the status item's *title* to
+  🪰; a Windows tray needs an image, so `assets/tray.png` ships a small glyph.
+- **No keyboard shortcuts.** The macOS menu binds p/b/e/a/r/s/q, which work
+  because the menu belongs to a focused app. Our overlay is deliberately
+  unfocusable and there is no menu bar, so accelerators would require registering
+  *global* shortcuts — grabbing keys system-wide, which contradicts this
+  project's permission-free, keystroke-blind design.
+
+## Packaging
+
+```sh
+npm run dist        # -> release/win-unpacked/DesktopFly.exe (~390 MB)
+```
+
+A `--dir` build, not an installer: an installer needs code-signing decisions that
+are out of scope here. `data/` is carried in as an extra resource, so the packaged
+app is self-contained — verified by renaming the repo's `data/` away and
+confirming the build still loaded all 23,210 somas and 668 circuit neurons.
 
 ## The brain window
 

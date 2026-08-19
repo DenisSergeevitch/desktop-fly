@@ -18,7 +18,7 @@ SceneKit; the brain data is real.
 | `Environment.swift` | permission-free senses: `WindowSense` (ledges/looms), circadian curve, user idle, thermal tempo |
 | `etl.py` | raw Codex dumps → `data/brain_points.json` + `data/circuit.json` |
 | `data/` | shipped derived data (CC BY-NC 4.0 — see `data/DATA_LICENSE.md`) |
-| `windows/` | Electron + TypeScript + Three.js port: `src/core` the sim, sense rules, arena and picking, `src/body` the body + `Fly` + `Coordinator`, `src/main` the Electron shell + `win32.ts` (koffi FFI), `src/renderer` the overlay and brain renderers, `src/cli` the suites (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
+| `windows/` | Electron + TypeScript + Three.js port, feature-complete: `src/core` the sim, sense rules, arena and picking, `src/body` the body + `Fly` + `Coordinator`, `src/main` the Electron shell + tray + `win32.ts` (koffi FFI), `src/renderer` the overlay and brain renderers, `src/cli` the suites, `assets/` the tray icon (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
 
 ## Build, run, verify
 
@@ -75,6 +75,16 @@ subtree is the Electron/TypeScript port and IS verifiable here:
   `LASTINPUTINFO` must be declared `_Inout_` or `dwTime` comes back 0.
 - Window ids must be **HWNDs**: with array indices every poll reports every
   window as newly appeared, and ledge tracking breaks.
+- Both windows must share one always-on-top band, or the full-screen overlay pins
+  the brain window beneath it. This machine has 31 topmost windows, so ordering
+  inside the band drifts; always-on-top is re-asserted on the window poll because
+  Windows silently strips it for full-screen apps.
+- Pause must reset the sim clock, not lean on the dt clamp: 50 ms of catch-up is
+  still a visible jump.
+- Packaging: `electron` must sit in devDependencies (electron-builder supplies the
+  runtime), `koffi` must be `asarUnpack`ed (a `.node` cannot load from an asar),
+  and `findDataDir` probes `process.resourcesPath` because a packaged app has no
+  repo above it.
 
 **Windows port architecture** (differs from macOS in two deliberate ways):
 - **The sim lives in the overlay renderer**, not main. Spikes travel overlay →
