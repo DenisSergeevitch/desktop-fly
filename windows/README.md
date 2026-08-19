@@ -3,29 +3,46 @@
 Windows port of DesktopFly. The brain is the same: the same `data/` files, the
 same 668-neuron FlyWire v783 circuit, the same 1 kHz LIF dynamics.
 
-**Status: M2a — body, headless.** The fly is fully alive — it walks, grooms,
-darts, takes off, flies, lands, sleeps, and rides window edges — but nothing is
-drawn yet. The overlay window is M2b.
+**Status: M2b — the fly is on screen.** A transparent, click-through,
+always-on-top overlay, with your cursor as a real looming stimulus into the
+LC4/LPLC2 population. Window terrain, sleep, taps and the tray menu are still to
+come (M3 and M5), so for now quit with Ctrl+C in the launching terminal.
 
 ## Requirements
 
 Node >= 24 (for native TypeScript type stripping) and `npm install`.
 
-`three` is a runtime dependency as of M2a — the fly's body is a Three.js scene
-graph, built without a renderer so it works headless. (M1's zero-install
-property covered the sim alone.)
+Runtime dependencies: `three` (M2a) and `electron` (M2b). If npm's script policy
+blocks Electron's postinstall, its binary will be missing; fetch it with
+`node node_modules/electron/install.js`.
 
 ## Commands
 
 ```sh
 cd windows
-node --test               # unit tests (64)
+node --test               # unit tests (93)
 npm run datatest          # data invariants (668 neurons / 18,968 edges / 23,210 points)
 npm run simtest           # circuit diagnostics, Swift-parity exit conditions
 npm run simtest:strict    # also asserts the ranges the Swift suite only prints
 npm run behaviortest      # 17 end-to-end checks: stimulate neurons -> body reacts
 npm run typecheck         # tsc --noEmit
+
+npm start                 # the overlay: a fly on your desktop (Ctrl+C to quit)
+npm run snapshot          # offscreen fly render -> fly.png
 ```
+
+To check the overlay without watching the screen — useful on a remote or
+non-interactive session — render it straight to a PNG:
+
+```sh
+npm run build && electron dist/main.cjs --capture=overlay.png
+```
+
+The capture uses a hidden window on purpose: `capturePage()` on a *visible*
+window needs a real interactive desktop surface and hangs without one. Renderer
+diagnostics go to `renderer.log`, because a GUI Electron process on Windows has
+no usable stdout — without that file a renderer exception is completely silent
+and looks like a hung window.
 
 `--seed=N` picks the RNG seed for any of the three suites (default 1).
 
@@ -46,6 +63,36 @@ screenshots, no GPU.
 to the Swift source, but nothing has been rendered, so any visual discrepancy
 against `assets/fly.png` is still unknown. Expect the legs and wings to need
 tuning once M2b can draw them.
+
+## What the overlay is
+
+One transparent full-screen window per display, `setIgnoreMouseEvents(true)` so
+every click passes through to whatever is underneath, and
+`setAlwaysOnTop(true, 'screen-saver')` to float above ordinary windows. Two
+settings in there are correctness issues rather than preferences, and both carry
+comments saying so:
+
+- `backgroundThrottling: false` — Chromium throttles `requestAnimationFrame` to
+  ~1 Hz for background or occluded windows, and the 1 kHz sim clock is driven
+  from the frame loop, so throttling would freeze the fly *and* stall the brain.
+- `setIgnoreMouseEvents(true)` without `forward: true` — the cursor is polled
+  globally at 30 Hz, so event forwarding (and its focus quirks) is unnecessary.
+
+Verified by capture: the overlay is fully transparent except for the fly itself
+(one 78x70 px region in a 3840x2160 frame).
+
+## Visual verdict against the macOS render
+
+`npm run snapshot` next to `assets/fly.png`: **close match.** Dark brown
+three-segment legs, brown thorax, banded abdomen with a dark tip, red eyes, and
+one translucent wing folded over the abdomen all line up. Two small deviations
+remain: the wing reads slightly greyer and shorter than SceneKit's, and the
+framing sits marginally off-centre.
+
+Getting there required fixing a colour-space bug that no test could see —
+`THREE.Color(r, g, b)` interprets its arguments in the linear working space,
+while the Swift source specifies sRGB via `NSColor(calibratedRed:)`. Passing
+sRGB numbers through as linear washed the entire fly out.
 
 ## Verified against the macOS build's documented invariants
 

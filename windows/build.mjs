@@ -5,6 +5,13 @@ import { copyFile, mkdir } from 'node:fs/promises';
 
 const common = { bundle: true, sourcemap: true, logLevel: 'info', target: 'es2023' };
 
+// EXPECTED WARNING: the cjs builds report `"import.meta" is not available with
+// the "cjs" output format and will be empty`. That is exactly the case
+// core/data.ts guards for — it falls back to __dirname when import.meta.url is
+// absent, so the same file works under Node ESM (tests, CLIs) and inside this
+// CommonJS bundle. Not a bug; do not "fix" it by switching the format, which
+// Electron's main process cannot load.
+
 await mkdir('dist', { recursive: true });
 
 

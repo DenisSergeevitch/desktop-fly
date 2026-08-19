@@ -18,7 +18,7 @@ SceneKit; the brain data is real.
 | `Environment.swift` | permission-free senses: `WindowSense` (ledges/looms), circadian curve, user idle, thermal tempo |
 | `etl.py` | raw Codex dumps → `data/brain_points.json` + `data/circuit.json` |
 | `data/` | shipped derived data (CC BY-NC 4.0 — see `data/DATA_LICENSE.md`) |
-| `windows/` | Electron + TypeScript + Three.js port: `src/core` is the sim (from `Sim.swift`), `src/body` the procedural body + `Fly` behavior (from `FlyModel.swift`), `src/cli` the suites (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
+| `windows/` | Electron + TypeScript + Three.js port: `src/core` the sim (from `Sim.swift`), `src/body` the body + `Fly` + `Coordinator` (from `FlyModel.swift` + `main.swift`), `src/main`/`src/renderer` the Electron shell and WebGL renderer, `src/cli` the suites (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
 
 ## Build, run, verify
 
@@ -53,6 +53,20 @@ subtree is the Electron/TypeScript port and IS verifiable here:
 `cd windows && node --test && npm run simtest:strict && npm run behaviortest`.
 `etl.py` and the
 `data/*.json` invariants are checkable on either platform.
+
+**Windows port gotchas** (each cost real debugging time):
+- `THREE.Color(r, g, b)` reads its arguments as **linear**-sRGB; the Swift
+  `NSColor(calibratedRed:)` values are sRGB. Convert with
+  `setRGB(..., THREE.SRGBColorSpace)` or the whole fly washes out.
+- `import.meta.url` is undefined in esbuild's CommonJS output, so anything
+  resolving paths from it must also handle `__dirname`.
+- Main must not *push* startup data to the renderer on `did-finish-load`: the
+  renderer subscribes after that fires. Use `invoke`/`handle`.
+- A GUI Electron process on Windows has no usable stdout — renderer errors go to
+  `windows/renderer.log`, and `capturePage()` on a *visible* window needs an
+  interactive desktop surface (use a hidden window to capture headlessly).
+- `backgroundThrottling: false` is load-bearing: the sim clock runs off
+  `requestAnimationFrame`, which Chromium throttles to ~1 Hz when occluded.
 
 **Caveat on the walk-duty invariant**: "walk-drive duty 20–50%" is a typical
 run, not a bound. The 330 partner neurons draw random baselines that set the
