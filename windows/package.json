@@ -17,7 +17,8 @@
     "behaviortest": "node src/cli/behaviortest.ts",
     "build": "node build.mjs",
     "start": "npm run build && electron dist/main.cjs",
-    "snapshot": "npm run build && electron dist/snapshot.cjs"
+    "snapshot": "npm run build && electron dist/snapshot.cjs",
+    "sensetest": "node src/cli/sensetest.ts"
   },
   "devDependencies": {
     "@types/node": "^24",
@@ -27,6 +28,7 @@
   },
   "dependencies": {
     "electron": "^43.4.1",
+    "koffi": "^3.1.5",
     "three": "^0.185.1"
   }
 }
