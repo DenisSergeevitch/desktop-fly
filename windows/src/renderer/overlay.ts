@@ -6,13 +6,13 @@
 // body/coordinator.ts, which is why that file is testable headless.
 
 import * as THREE from 'three';
-import { Coordinator } from '../body/coordinator.ts';
+import { Coordinator, type Senses } from '../body/coordinator.ts';
 import { LIFSim } from '../core/sim.ts';
 import type { CircuitFile } from '../core/data.ts';
 
 interface DesktopFlyBridge {
   getCircuit(): Promise<CircuitFile | null>;
-  onSenses(cb: (s: { cursor?: { x: number; y: number } | null }) => void): void;
+  onSenses(cb: (s: Partial<Senses>) => void): void;
   onCommand(cb: (c: string) => void): void;
 }
 
@@ -48,8 +48,13 @@ async function main(): Promise<void> {
     + `sim=${sim === null ? 'none' : `${sim.n} neurons`}`);
   const camera = coordinator.scene.getObjectByName('camera') as THREE.Camera;
 
+  let loggedTerrain = false;
   window.desktopfly.onSenses((s) => {
-    if (s.cursor !== undefined) coordinator.setSenses({ cursor: s.cursor });
+    coordinator.setSenses(s);
+    if (!loggedTerrain && s.ledges !== undefined && s.ledges.length > 0) {
+      loggedTerrain = true;
+      console.log(`terrain: ${s.ledges.length} walkable window edges`);
+    }
   });
 
   window.desktopfly.onCommand((c) => {

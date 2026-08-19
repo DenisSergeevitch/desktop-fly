@@ -21,7 +21,11 @@ await build({
   entryPoints: ['src/main/main.ts'],
   outfile: 'dist/main.cjs',
   ...cjs,
-  external: ['electron'],
+  // koffi is a NATIVE module: it must be required at runtime, never bundled.
+  // Bundling it also exposed a sharp edge — the import.meta define above rewrote
+  // koffi's own createRequire(import.meta.url) to createRequire(undefined),
+  // which threw at load and hung the app before its first frame.
+  external: ['electron', 'koffi'],
 });
 
 await build({
@@ -29,7 +33,11 @@ await build({
   entryPoints: ['src/renderer/preload.ts'],
   outfile: 'dist/preload.cjs',
   ...cjs,
-  external: ['electron'],
+  // koffi is a NATIVE module: it must be required at runtime, never bundled.
+  // Bundling it also exposed a sharp edge — the import.meta define above rewrote
+  // koffi's own createRequire(import.meta.url) to createRequire(undefined),
+  // which threw at load and hung the app before its first frame.
+  external: ['electron', 'koffi'],
 });
 
 // The renderer bundles three; it is the only place a WebGLRenderer exists.
@@ -54,7 +62,11 @@ await build({
   entryPoints: ['src/cli/snapshot.ts'],
   outfile: 'dist/snapshot.cjs',
   ...cjs,
-  external: ['electron'],
+  // koffi is a NATIVE module: it must be required at runtime, never bundled.
+  // Bundling it also exposed a sharp edge — the import.meta define above rewrote
+  // koffi's own createRequire(import.meta.url) to createRequire(undefined),
+  // which threw at load and hung the app before its first frame.
+  external: ['electron', 'koffi'],
 });
 
 for (const f of ['index.html', 'snapshot.html']) {

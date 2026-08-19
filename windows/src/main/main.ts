@@ -9,9 +9,24 @@ import { app, BrowserWindow, ipcMain, powerMonitor, screen } from 'electron';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
+import os from 'node:os';
 import { loadBrainData } from '../core/data.ts';
+import { WindowTerrain } from '../core/windowTerrain.ts';
+import { InputSense, isSleepy } from '../core/idle.ts';
+import { CpuSampler, tempoFromLoad } from '../core/tempo.ts';
+import { circadianActivity } from '../core/circadian.ts';
+import {
+  enumerateWindows, lastInputTick, leftButtonClicked, tickCount,
+} from './win32.ts';
 
-const CURSOR_HZ = 30;   // main.swift:761 — the same poll rate
+const CURSOR_HZ = 30;         // main.swift:761 — the same poll rate
+const WINDOW_POLL_MS = 700;   // main.swift:780 — window terrain at ~1.4 Hz
+const CPU_POLL_MS = 2000;     // no macOS equivalent: thermalState is free to read
+
+const terrain = new WindowTerrain();
+const input = new InputSense();
+const cpuSampler = new CpuSampler();
+let tempo = 1;
 
 // --capture=out.png renders the overlay to a PNG and exits. The window stays
 // HIDDEN in that mode: capturePage() on a visible window needs a real
@@ -23,6 +38,8 @@ const capturePath = capArg === undefined
 
 let win: BrowserWindow | null = null;
 let cursorTimer: NodeJS.Timeout | null = null;
+let windowTimer: NodeJS.Timeout | null = null;
+let cpuTimer: NodeJS.Timeout | null = null;
 let displayId: number | null = null;
 
 function activeDisplay(): Electron.Display {
@@ -114,11 +131,49 @@ function startCursorPoll(): void {
   cursorTimer = setInterval(() => {
     if (win === null || win.isDestroyed()) return;
     const d = activeDisplay();
-    const cursor = toScene(screen.getCursorScreenPoint(), d);
-    // M3 fills in ledges/taps/idle/tempo; M2b ships only the cursor, and the
-    // defaults the coordinator already applies for the rest.
-    win.webContents.send('senses', { cursor });
+    const screenCursor = screen.getCursorScreenPoint();
+    const cursor = toScene(screenCursor, d);
+
+    // Idle, and typing inferred from input-without-cursor-movement. This is the
+    // privacy-preserving substitution for macOS's keyboard-only idle query: we
+    // learn WHEN keys were pressed, never which.
+    const s = input.sample(lastInputTick(), tickCount(), screenCursor);
+    const now = new Date();
+    const hour = now.getHours() + now.getMinutes() / 60;
+
+    // A click is a tap on the fly's substrate (main.swift:795-800).
+    const taps = leftButtonClicked() ? [cursor] : [];
+
+    win.webContents.send('senses', {
+      cursor,
+      taps,
+      typing: s.typing,
+      sleepy: isSleepy(s.idleSeconds, hour),
+      tempo,
+      activity: circadianActivity(hour),
+    });
   }, Math.round(1000 / CURSOR_HZ));
+}
+
+// main.swift:780-792 — window terrain plus looms from newly appeared windows
+function startWindowPoll(): void {
+  windowTimer = setInterval(() => {
+    if (win === null || win.isDestroyed()) return;
+    const d = activeDisplay();
+    const snap = terrain.poll(enumerateWindows(d.scaleFactor), d.bounds);
+    win.webContents.send('senses', {
+      ledges: snap.ledges,
+      newWindows: snap.newWindows,
+    });
+  }, WINDOW_POLL_MS);
+}
+
+// SUBSTITUTION for thermalTempo(): a busy PC is a faster fly.
+function startCpuPoll(): void {
+  cpuSampler.sample(os.cpus());
+  cpuTimer = setInterval(() => {
+    tempo = tempoFromLoad(cpuSampler.sample(os.cpus()));
+  }, CPU_POLL_MS);
 }
 
 function placeOnActiveDisplay(): void {
@@ -131,6 +186,8 @@ function placeOnActiveDisplay(): void {
 app.whenReady().then(() => {
   createWindow();
   startCursorPoll();
+  startWindowPoll();
+  startCpuPoll();
 
   // if the current display disappears or is rescaled (main.swift:803-811)
   screen.on('display-metrics-changed', placeOnActiveDisplay);
@@ -178,6 +235,8 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (cursorTimer !== null) clearInterval(cursorTimer);
+  for (const t of [cursorTimer, windowTimer, cpuTimer]) {
+    if (t !== null) clearInterval(t);
+  }
   app.quit();
 });
