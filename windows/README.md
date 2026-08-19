@@ -3,16 +3,17 @@
 Windows port of DesktopFly. The brain is the same: the same `data/` files, the
 same 668-neuron FlyWire v783 circuit, the same 1 kHz LIF dynamics.
 
-**Status: M2b — the fly is on screen.** A transparent, click-through,
-always-on-top overlay, with your cursor as a real looming stimulus into the
-LC4/LPLC2 population. Window terrain, sleep, taps and the tray menu are still to
-come (M3 and M5), so for now quit with Ctrl+C in the launching terminal.
+**Status: M3 — the fly lives in your desktop.** A transparent, click-through,
+always-on-top overlay; your cursor is a real looming stimulus into the LC4/LPLC2
+population; your window title bars are walkable ledges; going idle at night puts
+it to sleep; clicks are substrate taps; and a busy PC makes it faster. The tray
+menu is still to come (M5), so quit with Ctrl+C in the launching terminal.
 
 ## Requirements
 
 Node >= 24 (for native TypeScript type stripping) and `npm install`.
 
-Runtime dependencies: `three` (M2a) and `electron` (M2b).
+Runtime dependencies: `three` (M2a), `electron` (M2b) and `koffi` (M3).
 
 **On npm's `allow-scripts` warnings.** If your npm blocks package install
 scripts, the two dependencies behave differently:
@@ -20,15 +21,15 @@ scripts, the two dependencies behave differently:
 - **`electron` genuinely needs its postinstall** — that step downloads the
   ~360 MB Chromium binary. Without it `dist/electron.exe` is missing and nothing
   runs. Fetch it explicitly with `node node_modules/electron/install.js`.
-- **`esbuild`'s warning is safe to ignore.** Its Windows binary ships inside the
-  `@esbuild/win32-x64` package, so `npm run build` works with the postinstall
-  still unapproved. Approving it is optional.
+- **`esbuild`'s and `koffi`'s warnings are safe to ignore.** Both ship prebuilt
+  Windows binaries (`@esbuild/win32-x64`, and koffi's own bundled build), so the
+  build and the Win32 calls work with their install scripts unapproved.
 
 ## Commands
 
 ```sh
 cd windows
-node --test               # unit tests (93)
+node --test               # unit tests (112)
 npm run datatest          # data invariants (668 neurons / 18,968 edges / 23,210 points)
 npm run simtest           # circuit diagnostics, Swift-parity exit conditions
 npm run simtest:strict    # also asserts the ranges the Swift suite only prints
@@ -37,6 +38,7 @@ npm run typecheck         # tsc --noEmit
 
 npm start                 # the overlay: a fly on your desktop (Ctrl+C to quit)
 npm run snapshot          # offscreen fly render -> fly.png
+npm run sensetest         # what the Win32 senses see on this machine
 ```
 
 To check the overlay without watching the screen — useful on a remote or
@@ -101,6 +103,33 @@ Getting there required fixing a colour-space bug that no test could see —
 `THREE.Color(r, g, b)` interprets its arguments in the linear working space,
 while the Swift source specifies sRGB via `NSColor(calibratedRed:)`. Passing
 sRGB numbers through as linear washed the entire fly out.
+
+## Desktop ecology (all permission-free)
+
+| sense | how | verified on this machine |
+|---|---|---|
+| window terrain | `EnumWindows` + `GetWindowRect`, filtered by `DWMWA_CLOAKED`, `WS_EX_TOOLWINDOW`, title and size | 653 windows → 15 visible → **3 walkable ledges** |
+| window looms | newly appeared windows feed the looming pathway | ids are HWNDs, so reopening counts as new |
+| sleep | `GetLastInputInfo`; idle > 10 min at night, or > 30 min any time | idle tracked to 0.1 s |
+| typing "vibration" | input advancing while the cursor is still | typing level rose to 0.83 while typing |
+| substrate taps | `GetAsyncKeyState(VK_LBUTTON)` polled at 30 Hz | one click = one tap |
+| tempo | CPU busy fraction from `os.cpus()` deltas | 14% → tempo 1.00 |
+
+Nothing here needs elevation, installs a hook, or can observe **which** key was
+pressed — only when, exactly as the macOS build guarantees. `core/` holds all the
+decision rules (and is tested); `main/win32.ts` is the only file that touches the
+FFI, and it degrades to empty results on any failure so the fly keeps walking.
+
+Two of these are **substitutions**, not equivalents, and are labelled as such in
+the code:
+
+- **CPU load stands in for `ProcessInfo.thermalState`.** Windows exposes no
+  dependable thermal API — laptop ACPI thermal zones are frequently absent or
+  wrong — so "a hot Mac is a fast fly" becomes "a busy PC is a fast fly". This is
+  not a temperature reading.
+- **Typing is inferred**, because `GetLastInputInfo` reports combined input while
+  macOS can ask about the keyboard alone. Input advancing without cursor movement
+  is read as typing.
 
 ## Verified against the macOS build's documented invariants
 

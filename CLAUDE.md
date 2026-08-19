@@ -18,7 +18,7 @@ SceneKit; the brain data is real.
 | `Environment.swift` | permission-free senses: `WindowSense` (ledges/looms), circadian curve, user idle, thermal tempo |
 | `etl.py` | raw Codex dumps → `data/brain_points.json` + `data/circuit.json` |
 | `data/` | shipped derived data (CC BY-NC 4.0 — see `data/DATA_LICENSE.md`) |
-| `windows/` | Electron + TypeScript + Three.js port: `src/core` the sim (from `Sim.swift`), `src/body` the body + `Fly` + `Coordinator` (from `FlyModel.swift` + `main.swift`), `src/main`/`src/renderer` the Electron shell and WebGL renderer, `src/cli` the suites (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
+| `windows/` | Electron + TypeScript + Three.js port: `src/core` the sim, sense rules and transductions, `src/body` the body + `Fly` + `Coordinator`, `src/main` the Electron shell + `win32.ts` (koffi FFI), `src/renderer` the WebGL renderer, `src/cli` the suites (design: `docs/superpowers/specs/2026-08-19-windows-port-design.md`) |
 
 ## Build, run, verify
 
@@ -67,6 +67,14 @@ subtree is the Electron/TypeScript port and IS verifiable here:
   interactive desktop surface (use a hidden window to capture headlessly).
 - `backgroundThrottling: false` is load-bearing: the sim clock runs off
   `requestAnimationFrame`, which Chromium throttles to ~1 Hz when occluded.
+- **Native modules must be `external` in esbuild**, never bundled — `koffi`
+  included. Bundling it rewrote its own `createRequire(import.meta.url)` and hung
+  the app at load.
+- koffi's `.d.ts` omits `proto`/`register`/`unregister`/`address` though all exist
+  at runtime, and `register()` needs `pointer(proto)`, not the bare proto.
+  `LASTINPUTINFO` must be declared `_Inout_` or `dwTime` comes back 0.
+- Window ids must be **HWNDs**: with array indices every poll reports every
+  window as newly appeared, and ledge tracking breaks.
 
 **Caveat on the walk-duty invariant**: "walk-drive duty 20–50%" is a typical
 run, not a bound. The 330 partner neurons draw random baselines that set the
