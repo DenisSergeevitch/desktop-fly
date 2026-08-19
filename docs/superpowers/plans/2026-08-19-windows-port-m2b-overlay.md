@@ -387,21 +387,28 @@ test('removeFly never removes fly #1 — it carries the brain', () => {
   assert.equal(c.scene.children.filter((n) => n === c.flies[0].node).length, 1);
 });
 
-test('a cursor lunge drives the real circuit to an escape', () => {
+test('a cursor lunge drives the real circuit to a fear response', () => {
+  // Dart OR escape, the same disjunction the Swift behaviortest uses. A cursor
+  // sweep is a RAMP, and CLAUDE.md is explicit that ramps lose the giant-fiber
+  // race to ~2,750 synapses of feedforward inhibition by design — so the
+  // looming population drives a nervous dart instead. Measured here: speed 130
+  // with dartTimer 0.88, no takeoff. Asserting `flying` would be asserting a
+  // bug into existence.
   const c = makeCoordinator();
   for (let i = 0; i < 120; i++) c.frame(DT);       // settle
   const fly = c.flies[0];
   fly.state = asFlyState('walking');
   fly.pos = { x: 0, y: 0 };
-  let escaped = false;
+  let afraid = false;
   // sweep the cursor in hard from 700 pt away
-  for (let i = 0; i < 40 && !escaped; i++) {
+  for (let i = 0; i < 40 && !afraid; i++) {
     const x = 700 - i * 45;
     c.setSenses({ cursor: { x, y: 0 } });
     c.frame(DT);
-    escaped = fly.state === 'flying';
+    afraid = fly.state === 'flying' || (fly.state === 'walking' && fly.speed > 100);
   }
-  assert.ok(escaped, 'a fast cursor lunge should make the giant fiber fire');
+  assert.ok(afraid,
+    `a fast cursor lunge should frighten the fly: ${fly.state} @ ${fly.speed}`);
 });
 
 test('escapeTest drives the loom pathway to an escape', () => {
@@ -476,7 +483,10 @@ test('retarget clamps flies into the new display and clears terrain', () => {
   c.setSenses({ ledges: [{ y: -40, x0: -300, x1: 300, id: 1 }] });
   c.frame(DT);
   c.retarget({ width: 800, height: 600 });
-  c.frame(DT);
+  // frame(0) drains the enqueued retarget without advancing the fly — a normal
+  // frame would let updateWalk step it a fraction past the clamp, which is
+  // legal (free walking clamps to width/2 - 20) but hides what is under test.
+  c.frame(0);
   assert.ok(Math.abs(c.flies[0].pos.x) <= 800 / 2 - 40 + 1e-6,
     `x ${c.flies[0].pos.x} outside the new display`);
   assert.ok(Math.abs(c.flies[0].pos.y) <= 600 / 2 - 40 + 1e-6);
