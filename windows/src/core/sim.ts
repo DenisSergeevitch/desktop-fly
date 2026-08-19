@@ -223,8 +223,145 @@ export class LIFSim {
     return s;
   }
 
-  step(_ms: number): void {
-    throw new Error('LIFSim.step not implemented yet (Task 3)');
+  // "optogenetic" stimulation from brain-window clicks (Sim.swift:149-161).
+  // The stimLock is dropped: a JS context is single-threaded.
+  stimulate(indices: number[], strength: number, durationMs: number): void {
+    if (indices.length === 0) return;
+    this.pendingStims.push({ idx: indices, strength, durationMs, untilMs: 0 });
+    if (this.pendingStims.length > 8) this.pendingStims.shift();
+  }
+
+  // Sim.swift:243-341. Order of operations inside the millisecond loop is
+  // load-bearing — decay/refractory, sensory injection, stimulation, delayed
+  // inhibition delivery, threshold detection, then propagation.
+  step(ms: number): void {
+    if (ms <= 0) return;
+
+    for (const p of this.pendingStims) {
+      p.untilMs = this.simMs + p.durationMs;
+      this.activeStims.push(p);
+    }
+    this.pendingStims.length = 0;
+    this.activeStims = this.activeStims.filter((s) => this.simMs < s.untilMs);
+
+    const spikedNow: SpikeEvent[] = [];
+    for (let t = 0; t < ms; t++) {
+      this.simMs++;
+      if (this.simMs >= this.burstNext) {
+        this.burstUntil = this.simMs + 400;
+        this.burstNext = this.simMs + Math.floor(rnd(this.rng, 15_000, 40_001));
+      }
+      const p = (this.simMs < this.burstUntil ? P_NOISE * 6 : P_NOISE)
+        * this.activityScale;
+
+      for (let i = 0; i < this.n; i++) {
+        if (this.refr[i] > 0) {
+          this.refr[i] -= 1;
+          this.v[i] *= DECAY;
+          continue;
+        }
+        let vi = this.v[i] * DECAY + this.baseline[i] * this.activityScale;
+        if (this.rng() < p) vi += NOISE_KICK;
+        this.v[i] = vi;
+      }
+
+      if (this.loomL > 0.001) {
+        for (const i of this.loomLeft) {
+          this.v[i] += this.loomL * LOOM_GAIN * this.sensoryGate;
+        }
+      }
+      if (this.loomR > 0.001) {
+        for (const i of this.loomRight) {
+          this.v[i] += this.loomR * LOOM_GAIN * this.sensoryGate;
+        }
+      }
+      // body -> brain: gait rhythm into ascending (proprioceptive) neurons
+      if (this.gaitDrive > 0.001) {
+        const ph = this.gaitPhase * 2 * Math.PI;
+        for (let k = 0; k < this.ascend.length; k++) {
+          this.v[this.ascend[k]] += this.gaitDrive * 0.09
+            * (0.5 + 0.5 * Math.sin(ph + this.ascendPhase[k]));
+        }
+      }
+      // fast air movement near the fly -> sensory pathway
+      if (this.airPuff > 0.001) {
+        for (const i of this.sens) {
+          this.v[i] += this.airPuff * 0.12 * this.sensoryGate;
+        }
+      }
+      // brain-window click stimulation
+      for (const s of this.activeStims) {
+        if (this.simMs < s.untilMs) {
+          for (const i of s.idx) this.v[i] += s.strength;
+        }
+      }
+
+      // deliver delayed inhibition scheduled for this millisecond
+      const q = this.inhQueue[this.qHead];
+      for (let j = 0; j < this.n; j++) {
+        if (q[j] !== 0) {
+          this.v[j] = Math.max(V_FLOOR, this.v[j] + q[j]);
+          q[j] = 0;
+        }
+      }
+
+      const spiked: number[] = [];
+      for (let i = 0; i < this.n; i++) {
+        if (this.refr[i] <= 0 && this.v[i] >= THRESHOLD) {
+          this.v[i] = 0;
+          this.refr[i] = REFRACTORY_MS;
+          spiked.push(i);
+        }
+      }
+      this.totalSpikes += spiked.length;
+
+      const inhSlot = (this.qHead + INH_DELAY_MS) % INH_QUEUE_LEN;
+      for (const i of spiked) {
+        for (let k = this.rowStart[i]; k < this.rowStart[i + 1]; k++) {
+          const j = this.colIdx[k];
+          if (this.w[k] >= 0) this.v[j] = Math.max(V_FLOOR, this.v[j] + this.w[k]);
+          else this.inhQueue[inhSlot][j] += this.w[k];
+        }
+      }
+      this.qHead = (this.qHead + 1) % INH_QUEUE_LEN;
+
+      // group rates (Hz per neuron, EMA)
+      let cLoom = 0, cDL = 0, cDR = 0, cM = 0, cF = 0, cG = 0, cW = 0;
+      for (const i of spiked) {
+        switch (this.roles[i]) {
+          case 'lc4':
+          case 'lplc2': cLoom++; break;
+          case 'dna01':
+          case 'dna02': if (this.dnaLSet.has(i)) cDL++; else cDR++; break;
+          case 'mdn': cM++; break;
+          case 'dnp09': cF++; break;
+          case 'dng11': cG++; break;
+          case 'escw': cW++; break;
+          case 'gf': this.gfLatch = true; break;
+          default: break;
+        }
+      }
+      const nLoom = Math.max(1, this.loomLeft.length + this.loomRight.length);
+      this.rateLoom += (cLoom * 1000 / nLoom - this.rateLoom) * RATE_ALPHA;
+      this.rateDNaL += (cDL * 1000 / Math.max(1, this.dnaL.length) - this.rateDNaL) * RATE_ALPHA;
+      this.rateDNaR += (cDR * 1000 / Math.max(1, this.dnaR.length) - this.rateDNaR) * RATE_ALPHA;
+      this.rateMDN += (cM * 1000 / Math.max(1, this.mdn.length) - this.rateMDN) * RATE_ALPHA;
+      this.rateFwd += (cF * 1000 / Math.max(1, this.fwd.length) - this.rateFwd) * RATE_ALPHA;
+      this.rateGroom += (cG * 1000 / Math.max(1, this.groom.length) - this.rateGroom) * RATE_ALPHA;
+      this.rateEscW += (cW * 1000 / Math.max(1, this.escw.length) - this.rateEscW) * RATE_ALPHA;
+      this.ratePop += (spiked.length * 1000 / Math.max(1, this.n) - this.ratePop) * RATE_ALPHA;
+
+      if (this.spikeBus !== null) {
+        const stride = Math.max(1, Math.floor(spiked.length / 12));
+        for (let i = 0; i < spiked.length; i += stride) {
+          spikedNow.push({
+            neuron: spiked[i],
+            isGF: this.roles[spiked[i]] === 'gf',
+          });
+        }
+      }
+    }
+    this.spikeBus?.push(spikedNow);
   }
 
   // --- test support: read-only, never used by app code ----------------------
