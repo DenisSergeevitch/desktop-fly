@@ -13,7 +13,8 @@
     "datatest": "node src/cli/datatest.ts",
     "simtest": "node src/cli/simtest.ts",
     "simtest:strict": "node src/cli/simtest.ts --strict",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "behaviortest": "node src/cli/behaviortest.ts"
   },
   "devDependencies": {
     "@types/node": "^24",
