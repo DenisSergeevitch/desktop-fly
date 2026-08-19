@@ -122,10 +122,17 @@ async function main(): Promise<void> {
   });
 
   window.desktopfly.onCommand((c) => {
+    console.log(`command: ${c} (flies=${coordinator.flies.length}, `
+      + `paused=${coordinator.paused}, simMs=${coordinator.sim?.simMs ?? 0})`);
     if (c === 'resetClock') {
       coordinator.resetClock();
       last = null;
       return;
+    }
+    if (c === 'pause') coordinator.setPaused(true);
+    if (c === 'resume') {
+      coordinator.setPaused(false);
+      last = null;   // do not bill the pause to the first frame back
     }
     if (c === 'escapeTest') coordinator.escapeTest();
     if (c === 'addFly') coordinator.addFly();

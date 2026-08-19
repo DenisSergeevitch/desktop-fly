@@ -218,3 +218,42 @@ test('the camera extents match the bounds, and follow a retarget', () => {
   assert.equal(cam.bottom, -300);
   assert.equal(c.bounds.width, 800);
 });
+test('pausing freezes the sim and the fly; resuming does not jump', () => {
+  // main.swift:856-861 sets scnView.isPlaying = false AND coordinator.lastTime =
+  // nil, so the first frame after resuming does not carry the whole pause as one
+  // enormous dt — which would teleport the fly across the screen.
+  const c = makeCoordinator();
+  for (let i = 0; i < 60; i++) c.frame(DT);
+  const simAt = c.sim!.simMs;
+  const flyAt = { x: c.flies[0].pos.x, y: c.flies[0].pos.y };
+  const timeAt = c.flies[0].time;
+
+  c.setPaused(true);
+  c.frame(0);                       // let the enqueued flag land
+  for (let i = 0; i < 60; i++) c.frame(DT);
+  assert.equal(c.paused, true);
+  assert.equal(c.sim!.simMs, simAt, 'the sim must not step while paused');
+  assert.equal(c.flies[0].time, timeAt, 'the fly clock must not advance');
+  assert.deepEqual({ x: c.flies[0].pos.x, y: c.flies[0].pos.y }, flyAt);
+
+  c.setPaused(false);
+  c.frame(0);
+  c.frame(DT);
+  assert.equal(c.paused, false);
+  const stepped = c.sim!.simMs - simAt;
+  assert.ok(stepped > 0 && stepped <= 20,
+    `first frame after resume stepped ${stepped} ms; must be one frame's worth`);
+});
+
+test('a pause longer than the dt clamp still resumes smoothly', () => {
+  const c = makeCoordinator();
+  for (let i = 0; i < 30; i++) c.frame(DT);
+  c.setPaused(true);
+  c.frame(0);
+  c.setPaused(false);
+  c.frame(0);
+  const before = { x: c.flies[0].pos.x, y: c.flies[0].pos.y };
+  c.frame(30);                      // 30 seconds of wall time in one frame
+  const moved = Math.hypot(c.flies[0].pos.x - before.x, c.flies[0].pos.y - before.y);
+  assert.ok(moved < 30, `fly jumped ${moved.toFixed(0)} pt on the first frame back`);
+});

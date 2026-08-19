@@ -5,7 +5,9 @@
 // converts OS state into scene coordinates and ships it over one IPC channel.
 // The renderer process is the SceneKit render thread's counterpart.
 
-import { app, BrowserWindow, ipcMain, powerMonitor, screen } from 'electron';
+import {
+  app, BrowserWindow, ipcMain, Menu, nativeImage, powerMonitor, screen, Tray,
+} from 'electron';
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
@@ -16,6 +18,7 @@ import { toSceneRects, unionBounds, type ScreenRect } from '../core/arena.ts';
 import { InputSense, isSleepy } from '../core/idle.ts';
 import { CpuSampler, tempoFromLoad } from '../core/tempo.ts';
 import { circadianActivity } from '../core/circadian.ts';
+import { dataInfoLine } from '../core/info.ts';
 import {
   enumerateWindows, lastInputTick, leftButtonClicked, tickCount,
 } from './win32.ts';
@@ -39,6 +42,8 @@ const capturePath = capArg === undefined
 
 let win: BrowserWindow | null = null;
 let brainWin: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let paused = false;
 let cursorTimer: NodeJS.Timeout | null = null;
 let windowTimer: NodeJS.Timeout | null = null;
 let cpuTimer: NodeJS.Timeout | null = null;
@@ -205,6 +210,65 @@ function createBrainWindow(): void {
   brainWin.on('closed', () => { brainWin = null; });
 }
 
+// The tray menu, matching main.swift:829-854 in order and wording. Three
+// deliberate omissions, all documented in windows/README.md: no "Move to Next
+// Display" (the overlay already spans every display), no keyboard accelerators
+// (they would need global shortcut registration, which contradicts a
+// keystroke-blind design), and a drawn icon rather than an emoji title.
+function buildTrayMenu(): void {
+  if (tray === null) return;
+  const data = loadBrainData();
+  const menu = Menu.buildFromTemplate([
+    { label: 'Desktop Fly', enabled: false },
+    { label: dataInfoLine(data?.points ?? null, data?.circuit ?? null), enabled: false },
+    { type: 'separator' },
+    {
+      label: paused ? 'Resume' : 'Pause',
+      click: () => {
+        paused = !paused;
+        win?.webContents.send('command', paused ? 'pause' : 'resume');
+        buildTrayMenu();   // the label tracks the state
+      },
+    },
+    { label: 'Show/Hide Brain', click: toggleBrain },
+    { label: 'Escape Test (loom)', click: () => send('escapeTest') },
+    { label: 'Add Fly', click: () => send('addFly') },
+    { label: 'Remove Fly', click: () => send('removeFly') },
+    { label: 'Scare Flies', click: () => send('scareAll') },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() },
+  ]);
+  tray.setContextMenu(menu);
+}
+
+function send(command: string): void {
+  if (win !== null && !win.isDestroyed()) win.webContents.send('command', command);
+}
+
+function toggleBrain(): void {
+  if (brainWin === null || brainWin.isDestroyed()) {
+    // Re-create it: closing the window with its X destroys it, and without this
+    // the menu item would silently do nothing afterwards.
+    if (loadBrainData() !== null) createBrainWindow();
+    return;
+  }
+  if (brainWin.isVisible()) {
+    brainWin.hide();
+  } else {
+    brainWin.show();
+    brainWin.moveTop();
+  }
+}
+
+function createTray(): void {
+  const icon = nativeImage.createFromPath(join(__dirname, 'tray.png'));
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
+  tray.setToolTip('DesktopFly — a real fly brain on your desktop');
+  // Windows convention: the primary action on a left click.
+  tray.on('click', toggleBrain);
+  buildTrayMenu();
+}
+
 function startCursorPoll(): void {
   cursorTimer = setInterval(() => {
     if (win === null || win.isDestroyed()) return;
@@ -284,6 +348,7 @@ app.whenReady().then(() => {
   createWindow();
   // Shown at startup when data/ loaded, exactly as main.swift:753-757 does.
   if (loadBrainData() !== null) createBrainWindow();
+  createTray();
   startCursorPoll();
   startWindowPoll();
   startCpuPoll();
@@ -345,6 +410,11 @@ app.whenReady().then(() => {
 }).catch((e: unknown) => {
   console.error('failed to start:', e);
   app.quit();
+});
+
+app.on('before-quit', () => {
+  tray?.destroy();
+  tray = null;
 });
 
 app.on('window-all-closed', () => {

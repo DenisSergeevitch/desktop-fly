@@ -77,6 +77,8 @@ await build({
   external: ['electron', 'koffi'],
 });
 
+await copyFile('assets/tray.png', 'dist/tray.png');
+
 for (const f of ['index.html', 'snapshot.html', 'brain.html']) {
   await copyFile(`src/renderer/${f}`, `dist/${f}`);
 }

@@ -106,6 +106,7 @@ export class Coordinator {
   private windowLoomR = 0;
   private loomOverride = 0;
   private lastFlyPos: Point = { x: 0, y: 0 };
+  private isPaused = false;
 
   constructor(opts: CoordinatorOptions) {
     this.bounds = opts.bounds;
@@ -178,6 +179,26 @@ export class Coordinator {
 
   escapeTest(): void {
     this.enqueue((c) => { c.loomOverride = 0.6; });
+  }
+
+  get paused(): boolean {
+    return this.isPaused;
+  }
+
+  // main.swift:856-861. Pausing stops the sim and the body; RESUMING must also
+  // reset the clock, or the first frame back carries the whole pause as one dt.
+  // The 50 ms frame clamp is not sufficient on its own — 50 ms of catch-up is
+  // still a visible jump, and the accumulated fraction would drain over the
+  // following frames.
+  setPaused(paused: boolean): void {
+    this.enqueue((c) => {
+      if (c.isPaused === paused) return;
+      c.isPaused = paused;
+      if (!paused) {
+        c.clock.reset();
+        c.loom.reset();
+      }
+    });
   }
 
   setSenses(s: Partial<Senses>): void {
@@ -265,6 +286,10 @@ export class Coordinator {
     const actions = this.pending;
     this.pending = [];
     for (const a of actions) a(this);
+
+    // Paused: pending mutations still land (so unpausing works) but neither the
+    // sim nor the body advances.
+    if (this.isPaused) return;
 
     // The clamp lives here rather than in the renderer (main.swift:649) so it
     // is covered by tests; the renderer passes its raw frame delta.
