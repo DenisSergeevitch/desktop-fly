@@ -19,9 +19,16 @@ app.whenReady().then(async () => {
     ipcMain.handle('circuit', () => loadBrainData()?.circuit ?? null);
     ipcMain.handle('points', () => loadBrainData()?.points ?? null);
   }
+  // --size=WxH reproduces a specific viewport. The live brain window is 340x280,
+  // and point-cloud brightness depends on viewport size, so a 720x560 render is
+  // not evidence about what the user actually sees.
+  const sizeArg = process.argv.find((a) => a.startsWith('--size='));
+  const [sw, sh] = sizeArg === undefined
+    ? [brain ? 720 : 720, brain ? 560 : 720]
+    : sizeArg.slice('--size='.length).split('x').map(Number);
   const win = new BrowserWindow({
-    width: brain ? 720 : 720,
-    height: brain ? 560 : 720,
+    width: sw,
+    height: sh,
     // useContentSize + frameless: without these the 720x720 canvas overflows a
     // smaller content area and the capture comes out non-square and cropped.
     useContentSize: true,
@@ -30,7 +37,14 @@ app.whenReady().then(async () => {
     webPreferences: {
       contextIsolation: true,
       preload: brain ? join(__dirname, 'preload.cjs') : undefined,
+      // Without this a HIDDEN window's requestAnimationFrame is throttled, so the
+      // captured frame can predate anything injected after load — which made two
+      // renders with and without spikes come out byte-identical.
+      backgroundThrottling: false,
     },
+  });
+  win.webContents.on('console-message', (e) => {
+    console.log(`[page ${e.level}] ${e.message}`);
   });
   await (brain
     ? win.loadFile(join(__dirname, 'brain.html'), { search: 'shot=1' })
@@ -39,10 +53,16 @@ app.whenReady().then(async () => {
   // spikes so the flashes appear, as the Swift preview does
   if (brain) {
     await new Promise((r) => setTimeout(r, 1200));
-    const fake = Array.from({ length: 40 },
-      () => ({ neuron: Math.floor(Math.random() * 660), isGF: false }));
-    fake.push({ neuron: 0, isGF: true });
-    win.webContents.send('spikes', fake);
+    // --nospikes renders the same frozen view without any flashes, so the two
+    // images can be diffed to prove the flashes actually reach the screen.
+    if (!process.argv.includes('--nospikes')) {
+      const fake = Array.from({ length: 40 }, (_, i) => ({
+        neuron: i * 13 % 660,   // deterministic, so the diff is reproducible
+        isGF: false,
+      }));
+      fake.push({ neuron: 0, isGF: true });
+      win.webContents.send('spikes', fake);
+    }
     await new Promise((r) => setTimeout(r, 150));
   } else {
     await new Promise((r) => setTimeout(r, 400));

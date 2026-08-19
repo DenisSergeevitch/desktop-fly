@@ -36,29 +36,71 @@ function srgb(c: readonly [number, number, number]): THREE.Color {
   return new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace);
 }
 
-// Additive, depth-write-off points: this is what makes 23k somas read as a brain
-// with visible internal structure instead of a flat grey fog
-// (BrainView.swift:29-34).
+// SceneKit sizes points in WORLD units and then clamps the result to a
+// screen-space radius range (BrainView.swift:25-27: pointSize 0.05, radius
+// 0.7-1.6 px for the cloud, 1.6-2.6 for the circuit). Neither of Three's
+// PointsMaterial modes reproduces that:
+//
+//   sizeAttenuation: true  -> no floor, so sparse somas fall below a pixel and
+//                             vanish; the cloud reads as scattered dust.
+//   sizeAttenuation: false -> no attenuation, so the size is fixed in pixels
+//                             regardless of viewport. In the real 340x280 window
+//                             the same 23k points cover 4.4x fewer pixels than in
+//                             a 720x560 render, additive blending saturates, and
+//                             the optic lobes blow out to solid white — hiding
+//                             every spike flash.
+//
+// So compute it properly: attenuate by depth, then clamp in device pixels.
+const POINT_VERT = `
+  uniform float uWorldSize;      // diameter in world units
+  uniform float uPixelsPerUnit;  // (viewportHeightPx / 2) / tan(fov / 2)
+  uniform float uMinPx;
+  uniform float uMaxPx;
+  varying vec3 vColor;
+  void main() {
+    vColor = color;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    gl_PointSize = clamp(uWorldSize * uPixelsPerUnit / -mv.z, uMinPx, uMaxPx);
+    gl_Position = projectionMatrix * mv;
+  }`;
+
+// Round rather than square: a 3 px square reads as a chunky pixel, and somas are
+// round. Also softens the edge so overlapping points blend instead of tiling.
+const POINT_FRAG = `
+  varying vec3 vColor;
+  void main() {
+    // Flat disc, NOT a soft falloff: at the 1.4 px floor a radial gradient throws
+    // away most of each point's energy and the whole cloud goes dark.
+    if (length(gl_PointCoord - vec2(0.5)) > 0.5) discard;
+    gl_FragColor = vec4(vColor, 1.0);
+  }`;
+
+interface PointCloud {
+  points: THREE.Points;
+  material: THREE.ShaderMaterial;
+}
+
 function pointCloud(positions: Float32Array, colors: Float32Array,
-                    size: number): THREE.Points {
+                    minPx: number, maxPx: number): PointCloud {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  const mat = new THREE.PointsMaterial({
-    size,
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uWorldSize: { value: 0.05 },     // SceneKit's elem.pointSize
+      uPixelsPerUnit: { value: 100 },  // set per frame from the viewport
+      uMinPx: { value: minPx },
+      uMaxPx: { value: maxPx },
+    },
+    vertexShader: POINT_VERT,
+    fragmentShader: POINT_FRAG,
     vertexColors: true,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     depthTest: false,
     transparent: true,
-    // SCREEN-space sizing, matching SceneKit's minimumPointScreenSpaceRadius /
-    // maximumPointScreenSpaceRadius clamps (BrainView.swift:26-27). With
-    // world-space attenuation instead, sparse somas fall below a pixel and the
-    // additive accumulation that makes the optic lobes glow never happens — the
-    // cloud reads as dim scattered dust rather than a brain.
-    sizeAttenuation: false,
   });
-  return new THREE.Points(geo, mat);
+  return { points: new THREE.Points(geo, material), material };
 }
 
 function emissiveSphere(radius: number, color: THREE.Color,
@@ -118,8 +160,10 @@ async function main(): Promise<void> {
     cloudCol[3 * kept + 2] = c.b;
     kept++;
   }
-  group.add(pointCloud(cloudPos.subarray(0, kept * 3),
-    cloudCol.subarray(0, kept * 3), 2.2));   // ~0.7-1.6 px radius
+  // radius 0.7-1.6 px -> diameter 1.4-3.2 device px
+  const cloud = pointCloud(cloudPos.subarray(0, kept * 3),
+    cloudCol.subarray(0, kept * 3), 2.0, 3.4);
+  group.add(cloud.points);
 
   // --- the circuit, brighter and larger on top -------------------------------
   const n = circuit.neurons.length;
@@ -139,7 +183,9 @@ async function main(): Promise<void> {
     simCol[3 * i + 1] = c.g;
     simCol[3 * i + 2] = c.b;
   }
-  group.add(pointCloud(simPos, simCol, 4.2));   // ~1.6-2.6 px radius
+  // radius 1.6-2.6 px -> diameter 3.2-5.2 device px
+  const circuitCloud = pointCloud(simPos, simCol, 3.2, 5.2);
+  group.add(circuitCloud.points);
 
   // --- the two giant fibers get real glowing markers -------------------------
   for (let i = 0; i < n; i++) {
@@ -237,13 +283,24 @@ async function main(): Promise<void> {
     labelUntil = now + 2.2;
   });
 
+  function updatePointScale(): void {
+    // device pixels per world unit at unit depth, for a perspective camera
+    const heightPx = renderer.domElement.height;
+    const ppu = (heightPx / 2) / Math.tan((camera.fov * Math.PI / 180) / 2);
+    cloud.material.uniforms.uPixelsPerUnit.value = ppu;
+    circuitCloud.material.uniforms.uPixelsPerUnit.value = ppu;
+  }
+
   window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
+    updatePointScale();
   });
 
-  console.log(`brain ready: ${kept} somas, ${n} circuit neurons`);
+  updatePointScale();
+  console.log(`brain ready: ${kept} somas, ${n} circuit neurons, `
+    + `${renderer.domElement.width}x${renderer.domElement.height} device px`);
 
   let last: number | null = null;
   function tick(ms: number): void {
@@ -281,9 +338,18 @@ async function main(): Promise<void> {
     }
 
     renderer.render(scene, camera);
+    if (!isShot) requestAnimationFrame(tick);
+  }
+
+  if (isShot) {
+    // A hidden window's requestAnimationFrame HALTS after about half a second,
+    // so an offscreen capture would show a stale frame — anything injected after
+    // that point (spike flashes, above all) would never be drawn. Timers keep
+    // running, so shot mode is driven by one.
+    setInterval(() => tick(performance.now()), 33);
+  } else {
     requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
 }
 
 window.addEventListener('error', (e) => {
