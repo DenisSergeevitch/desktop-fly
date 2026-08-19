@@ -37,8 +37,14 @@ function moduleDir(): string {
 
 export function findDataDir(): string | null {
   const here = moduleDir();
+  // A packaged app has no repo above it: the shared data/ is carried in as an
+  // extra resource next to the app bundle. process.resourcesPath only exists
+  // under Electron, so it is probed defensively — this module also runs under
+  // plain Node for the test suites.
+  const resources = (process as { resourcesPath?: string }).resourcesPath;
   const candidates = [
-    join(here, 'data'),                        // packaged: resources/data
+    ...(resources === undefined ? [] : [join(resources, 'data')]),
+    join(here, 'data'),                        // dist/data, if ever copied
     resolve(here, '..', '..', 'data'),         // windows/data
     resolve(here, '..', '..', '..', 'data'),   // repo root data/ (from src/core)
     resolve(here, '..', 'data'),               // windows/data (from dist/)

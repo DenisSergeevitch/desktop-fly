@@ -2,6 +2,7 @@
   "name": "desktopfly-windows",
   "version": "0.1.0",
   "private": true,
+  "main": "dist/main.cjs",
   "description": "Windows port of DesktopFly - real FlyWire connectome, live LIF sim",
   "license": "MIT",
   "type": "module",
@@ -19,17 +20,46 @@
     "start": "npm run build && electron dist/main.cjs",
     "snapshot": "npm run build && electron dist/snapshot.cjs",
     "sensetest": "node src/cli/sensetest.ts",
-    "brainshot": "npm run build && electron dist/snapshot.cjs --brain brain.png"
+    "brainshot": "npm run build && electron dist/snapshot.cjs --brain brain.png",
+    "dist": "npm run build && electron-builder --dir"
   },
   "devDependencies": {
     "@types/node": "^24",
     "@types/three": "^0.185.4",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
-    "typescript": "^5"
+    "typescript": "^5",
+    "electron": "^43.4.1"
   },
   "dependencies": {
-    "electron": "^43.4.1",
     "koffi": "^3.1.5",
     "three": "^0.185.1"
-  }
+  },
+  "build": {
+    "appId": "com.desktopfly.windows",
+    "productName": "DesktopFly",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "package.json",
+      "node_modules/koffi/**"
+    ],
+    "asarUnpack": [
+      "node_modules/koffi/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../data",
+        "to": "data"
+      }
+    ],
+    "win": {
+      "target": [
+        "dir"
+      ]
+    }
+  },
+  "author": "DesktopFly contributors"
 }

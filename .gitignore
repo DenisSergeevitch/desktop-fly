@@ -10,3 +10,4 @@ windows/dist/
 windows/*.png
 windows/*.log
 windows/*.txt
+windows/release/
