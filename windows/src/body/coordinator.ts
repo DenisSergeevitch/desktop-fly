@@ -20,6 +20,7 @@ import { LoomTransducer } from '../core/loom.ts';
 import { SimClock } from '../core/simclock.ts';
 import { clampf } from '../core/mathutil.ts';
 import type { BrainSignals, Ledge } from '../core/types.ts';
+import type { Arena } from '../core/arena.ts';
 
 export interface Senses {
   cursor: Point | null;
@@ -37,6 +38,7 @@ export interface CoordinatorOptions {
   sim: LIFSim | null;
   scene?: THREE.Scene;
   seed?: number;
+  arena?: Arena;
 }
 
 const MAX_DT = 0.05;   // main.swift:649 — a frame hitch must not teleport the fly
@@ -90,6 +92,7 @@ export class Coordinator {
   private readonly loom = new LoomTransducer();
   private readonly clock = new SimClock();
   private readonly seed: number | undefined;
+  private arena: Arena | null = null;
   private flyCount = 0;
 
   // senses, written from outside and read in the frame loop
@@ -109,6 +112,7 @@ export class Coordinator {
     this.sim = opts.sim;
     this.seed = opts.seed;
     this.scene = opts.scene ?? buildScene(opts.bounds);
+    this.arena = opts.arena ?? null;
     this.addFlyNow();
   }
 
@@ -126,12 +130,29 @@ export class Coordinator {
     const hw = this.bounds.width / 2 - 100;
     const hh = this.bounds.height / 2 - 100;
     const seed = this.nextSeed();
-    const at = this.flies.length === 0
+    let at = this.flies.length === 0
       ? { x: 0, y: 0 }
       : { x: (Math.random() * 2 - 1) * hw, y: (Math.random() * 2 - 1) * hh };
+    // With an arena, the scene origin can itself be in the gap between monitors,
+    // so even fly #1 has to be placed onto a real display.
+    if (this.arena !== null) at = this.arena.clamp(at.x, at.y, 60);
     const fly = new Fly(at, seed);
+    fly.arena = this.arena;
     this.flies.push(fly);
     this.scene.add(fly.node);
+  }
+
+  // The display layout changed: new bounding box and new covered region.
+  setArena(arena: Arena): void {
+    this.enqueue((c) => {
+      c.arena = arena;
+      for (const fly of c.flies) {
+        fly.arena = arena;
+        const p = arena.clamp(fly.pos.x, fly.pos.y, 40);
+        fly.pos.x = p.x;
+        fly.pos.y = p.y;
+      }
+    });
   }
 
   addFly(): void {

@@ -7,11 +7,19 @@
 
 import * as THREE from 'three';
 import { Coordinator, type Senses } from '../body/coordinator.ts';
+import { Arena, type SceneRect } from '../core/arena.ts';
 import { LIFSim } from '../core/sim.ts';
 import type { CircuitFile } from '../core/data.ts';
 
+interface ArenaMessage {
+  box: { width: number; height: number };
+  rects: SceneRect[];
+}
+
 interface DesktopFlyBridge {
   getCircuit(): Promise<CircuitFile | null>;
+  getArena(): Promise<ArenaMessage>;
+  onArena(cb: (a: ArenaMessage) => void): void;
   onSenses(cb: (s: Partial<Senses>) => void): void;
   onCommand(cb: (c: string) => void): void;
 }
@@ -50,16 +58,47 @@ async function main(): Promise<void> {
   const coordinator = new Coordinator({ bounds, sim });
   console.log(`overlay ready: ${bounds.width}x${bounds.height}, `
     + `sim=${sim === null ? 'none' : `${sim.n} neurons`}`);
-  // Guard the scene->pixel mapping: the canvas must occupy exactly the window
-  // in CSS pixels. If these ever diverge, the fly drifts off screen.
-  if (canvas.clientWidth !== window.innerWidth
-      || canvas.clientHeight !== window.innerHeight) {
-    console.error(`canvas/window mismatch: canvas is `
-      + `${canvas.clientWidth}x${canvas.clientHeight} CSS px in a `
-      + `${window.innerWidth}x${window.innerHeight} window — the fly will `
-      + 'appear to leave the screen');
+  // Guard the scene->pixel mapping: the canvas must occupy exactly the window in
+  // CSS pixels. If these ever diverge, the fly drifts off screen. Re-checked
+  // after every arena change, since that is when the window is resized.
+  function checkCanvasFitsWindow(): void {
+    if (canvas.clientWidth !== window.innerWidth
+        || canvas.clientHeight !== window.innerHeight) {
+      console.error(`canvas/window mismatch: canvas is `
+        + `${canvas.clientWidth}x${canvas.clientHeight} CSS px in a `
+        + `${window.innerWidth}x${window.innerHeight} window — the fly will `
+        + 'appear to leave the screen');
+    }
   }
   const camera = coordinator.scene.getObjectByName('camera') as THREE.Camera;
+
+  // The overlay spans every display. The window is the rectangular bounding box;
+  // the Arena is the union of the real monitor rectangles, so the fly cannot walk
+  // into the gap between two differently sized or offset screens.
+  function applyArena(a: ArenaMessage): void {
+    // Size the canvas AND the camera from the window, not from the arena box.
+    // With fractional per-monitor scaling the two differ by a pixel — a 1545 DIP
+    // box is 2317.5 physical px at 150%, so the window rounds to 1546 DIP — and
+    // driving them from different numbers would leave a permanent mismatch.
+    bounds = { width: window.innerWidth, height: window.innerHeight };
+    renderer.setSize(bounds.width, bounds.height);
+    coordinator.retarget(bounds);
+    coordinator.setArena(new Arena(a.rects));
+    console.log(`arena: ${a.box.width}x${a.box.height} box over `
+      + `${a.rects.length} display(s), window ${bounds.width}x${bounds.height}`);
+    checkCanvasFitsWindow();
+  }
+
+  // PULL the initial geometry, then listen for layout changes: a push at startup
+  // races the renderer's subscription (the bug that hung M2b's circuit handoff).
+  let currentArena = await window.desktopfly.getArena();
+  applyArena(currentArena);
+  window.desktopfly.onArena((a) => {
+    currentArena = a;
+    applyArena(a);
+  });
+  // The window resize can land after the arena message, so re-apply on resize.
+  window.addEventListener('resize', () => applyArena(currentArena));
 
   let loggedTerrain = false;
   window.desktopfly.onSenses((s) => {
@@ -74,13 +113,6 @@ async function main(): Promise<void> {
     if (c === 'resetClock') {
       coordinator.resetClock();
       last = null;
-      return;
-    }
-    if (c.startsWith('bounds:')) {
-      const [w, h] = c.slice('bounds:'.length).split('x').map(Number);
-      bounds = { width: w, height: h };
-      renderer.setSize(w, h);
-      coordinator.retarget(bounds);
       return;
     }
     if (c === 'escapeTest') coordinator.escapeTest();

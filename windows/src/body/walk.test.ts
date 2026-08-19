@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Fly, asFlyState } from './fly.ts';
 import { defaultSignals, type Ledge } from '../core/types.ts';
+import { Arena, toSceneRects } from '../core/arena.ts';
 
 const BOUNDS = { width: 1512, height: 982 };
 const DT = 1 / 60;
@@ -121,4 +122,51 @@ test('the gait bobs the body vertically while walking', () => {
   }
   assert.ok(hi - lo > 0.1, `gait bob range ${hi - lo}`);
   assert.ok(hi <= 0.35 + 1e-9, `bob peaked at ${hi}, above the 0.35 cap`);
+});
+
+test('spanning two monitors, the fly never walks into the gap between them', () => {
+  // The development machine's real layout: 2560x1392 primary at the origin and a
+  // 1536x912 secondary offset DOWN by 633. Their bounding box is 4096x1545, and
+  // large parts of that box are on no display at all — a fly walking there would
+  // simply vanish, since nothing renders it.
+  const areas = [
+    { x: 0, y: 0, width: 2560, height: 1392 },
+    { x: 2560, y: 633, width: 1536, height: 912 },
+  ];
+  const arena = new Arena(toSceneRects(areas));
+  const span = { width: arena.width, height: arena.height };
+
+  const fly = new Fly({ x: -1000, y: 0 }, 4);   // on the primary
+  fly.arena = arena;
+  fly.state = asFlyState('walking');
+  fly.speed = 150;
+  assert.equal(arena.contains(fly.pos.x, fly.pos.y), true);
+
+  // 30 s of fast walking, repeatedly aimed at the dead corners
+  for (let i = 0; i < 1800; i++) {
+    if (i % 300 === 0) fly.heading = [0.4, -0.4, 2.7, -2.7][(i / 300) % 4];
+    fly.update(DT, span, null, walkSignals());
+    if (fly.state !== 'walking') continue;
+    assert.equal(arena.contains(fly.pos.x, fly.pos.y, -1e-6), true,
+      `frame ${i}: fly reached ${fly.pos.x.toFixed(0)},${fly.pos.y.toFixed(0)}, `
+      + 'which is on no display');
+  }
+});
+
+test('flights across a spanning arena always target a real display', () => {
+  const areas = [
+    { x: 0, y: 0, width: 2560, height: 1392 },
+    { x: 2560, y: 633, width: 1536, height: 912 },
+  ];
+  const arena = new Arena(toSceneRects(areas));
+  const span = { width: arena.width, height: arena.height };
+  for (let seed = 1; seed <= 40; seed++) {
+    const fly = new Fly({ x: -1000, y: 0 }, seed);
+    fly.arena = arena;
+    fly.state = asFlyState('idle');
+    fly.startFlight({ bounds: span });
+    assert.equal(arena.contains(fly.flightTo.x, fly.flightTo.y), true,
+      `seed ${seed}: flight target ${fly.flightTo.x.toFixed(0)},`
+      + `${fly.flightTo.y.toFixed(0)} is on no display`);
+  }
 });

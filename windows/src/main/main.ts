@@ -12,6 +12,7 @@ import { appendFileSync } from 'node:fs';
 import os from 'node:os';
 import { loadBrainData } from '../core/data.ts';
 import { WindowTerrain } from '../core/windowTerrain.ts';
+import { toSceneRects, unionBounds, type ScreenRect } from '../core/arena.ts';
 import { InputSense, isSleepy } from '../core/idle.ts';
 import { CpuSampler, tempoFromLoad } from '../core/tempo.ts';
 import { circadianActivity } from '../core/circadian.ts';
@@ -40,45 +41,64 @@ let win: BrowserWindow | null = null;
 let cursorTimer: NodeJS.Timeout | null = null;
 let windowTimer: NodeJS.Timeout | null = null;
 let cpuTimer: NodeJS.Timeout | null = null;
-let displayId: number | null = null;
 
-// The fly's arena. Windows clamps a normal window to the work area anyway (the
-// overlay came out 1392 tall when asked for 1440), and the taskbar is a poor
-// place for a fly, so the work area IS the arena — used by the window bounds,
-// the cursor conversion and the terrain poll alike. macOS uses the full
-// screen.frame; this is the deliberate Windows equivalent.
-function arena(d: Electron.Display): Electron.Rectangle {
-  return d.workArea;
+// The fly's arena spans EVERY display: on Windows the desktop is one continuous
+// space, unlike macOS where the overlay lives on one screen and hops on command.
+//
+// Work areas rather than full bounds, for two reasons: Windows clamps a normal
+// window to the work area anyway (the overlay came out 1392 tall when asked for
+// 1440), and the taskbar is a poor place for a fly.
+//
+// The window must be the rectangular bounding box, but the monitors may not tile
+// it — so core/arena.ts keeps the fly on the union of the real rectangles while
+// the window covers the box.
+function workAreas(): ScreenRect[] {
+  return screen.getAllDisplays().map((d) => d.workArea);
 }
 
-function activeDisplay(): Electron.Display {
-  const all = screen.getAllDisplays();
-  const found = all.find((d) => d.id === displayId);
-  return found ?? screen.getPrimaryDisplay();
+function arenaBox(): ScreenRect {
+  return unionBounds(workAreas());
 }
 
 // Screen (DIP, origin top-left of the primary display, y down)
 //   -> scene (origin at the centre of the fly's display, y UP).
 // Working in DIPs makes Chromium absorb per-monitor DPI scaling, so the body
 // math keeps operating in macOS-equivalent "points".
-function toScene(p: { x: number; y: number }, d: Electron.Display) {
-  const a = arena(d);
+// Screen (DIP, y down) -> scene (origin at the centre of the arena box, y UP).
+function toScene(p: { x: number; y: number }, box: ScreenRect) {
   return {
-    x: p.x - (a.x + a.width / 2),
-    y: (a.y + a.height / 2) - p.y,
+    x: p.x - (box.x + box.width / 2),
+    y: (box.y + box.height / 2) - p.y,
   };
 }
 
-function createWindow(): void {
-  const d = screen.getPrimaryDisplay();
-  displayId = d.id;
+function arenaMessage() {
+  const areas = workAreas();
+  const box = unionBounds(areas);
+  return {
+    box: { width: box.width, height: box.height },
+    rects: toSceneRects(areas),
+  };
+}
 
-  const a = arena(d);
+// Resize the window to the union box and tell the renderer. PUSH is only correct
+// for LATER layout changes: at startup the renderer has not subscribed yet, so
+// the initial value is PULLED via ipcMain.handle('arena') — the same race that
+// silently broke the circuit handoff in M2b.
+function sendArena(): void {
+  if (win === null || win.isDestroyed()) return;
+  const box = unionBounds(workAreas());
+  win.setBounds({ x: box.x, y: box.y, width: box.width, height: box.height });
+  win.webContents.send('arena', arenaMessage());
+}
+
+function createWindow(): void {
+  const box = arenaBox();
   win = new BrowserWindow({
-    x: a.x,
-    y: a.y,
-    width: a.width,
-    height: a.height,
+    x: box.x,
+    y: box.y,
+    width: box.width,
+    height: box.height,
     transparent: true,       // per-pixel alpha; the desktop shows through
     frame: false,
     resizable: false,
@@ -133,16 +153,20 @@ function createWindow(): void {
   void win.loadFile(join(__dirname, 'index.html'));
 
   win.webContents.once('did-finish-load', () => {
-    win?.webContents.send('command', `bounds:${a.width}x${a.height}`);
+    const startBox = arenaBox();
+    win?.setBounds({
+      x: startBox.x, y: startBox.y,
+      width: startBox.width, height: startBox.height,
+    });
   });
 }
 
 function startCursorPoll(): void {
   cursorTimer = setInterval(() => {
     if (win === null || win.isDestroyed()) return;
-    const d = activeDisplay();
+    const box = arenaBox();
     const screenCursor = screen.getCursorScreenPoint();
-    const cursor = toScene(screenCursor, d);
+    const cursor = toScene(screenCursor, box);
 
     // Idle, and typing inferred from input-without-cursor-movement. This is the
     // privacy-preserving substitution for macOS's keyboard-only idle query: we
@@ -169,8 +193,17 @@ function startCursorPoll(): void {
 function startWindowPoll(): void {
   windowTimer = setInterval(() => {
     if (win === null || win.isDestroyed()) return;
-    const d = activeDisplay();
-    const snap = terrain.poll(enumerateWindows(d.scaleFactor), arena(d));
+    const box = arenaBox();
+    // GetWindowRect returns PHYSICAL pixels. With per-monitor scaling (150% and
+    // 125% here) one divisor cannot be right for both, so let Electron convert
+    // each rect: screenToDipRect knows which display each window is on.
+    const raw = enumerateWindows().map((w) => {
+      const dip = screen.screenToDipRect(null, {
+        x: w.x, y: w.y, width: w.width, height: w.height,
+      });
+      return { ...w, x: dip.x, y: dip.y, width: dip.width, height: dip.height };
+    });
+    const snap = terrain.poll(raw, box);
     win.webContents.send('senses', {
       ledges: snap.ledges,
       newWindows: snap.newWindows,
@@ -186,12 +219,8 @@ function startCpuPoll(): void {
   }, CPU_POLL_MS);
 }
 
-function placeOnActiveDisplay(): void {
-  if (win === null || win.isDestroyed()) return;
-  const d = activeDisplay();
-  const a = arena(d);
-  win.setBounds(a);
-  win.webContents.send('command', `bounds:${a.width}x${a.height}`);
+function onDisplaysChanged(): void {
+  sendArena();
 }
 
 app.whenReady().then(() => {
@@ -201,12 +230,9 @@ app.whenReady().then(() => {
   startCpuPoll();
 
   // if the current display disappears or is rescaled (main.swift:803-811)
-  screen.on('display-metrics-changed', placeOnActiveDisplay);
-  screen.on('display-removed', () => {
-    displayId = screen.getPrimaryDisplay().id;
-    placeOnActiveDisplay();
-  });
-  screen.on('display-added', placeOnActiveDisplay);
+  screen.on('display-metrics-changed', onDisplaysChanged);
+  screen.on('display-removed', onDisplaysChanged);
+  screen.on('display-added', onDisplaysChanged);
 
   // after a machine sleep the first frame delta is meaningless
   powerMonitor.on('resume', () => {
@@ -215,6 +241,8 @@ app.whenReady().then(() => {
 
   // data/ is read here, in the process that can reach the filesystem, and
   // handed over on request. Never copied or modified — it stays CC BY-NC.
+  ipcMain.handle('arena', () => arenaMessage());
+
   ipcMain.handle('circuit', () => {
     const data = loadBrainData();
     if (data === null) {

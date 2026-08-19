@@ -12,6 +12,7 @@ import { EDGE_MARGIN, FLY_SCALE, NERVOUS_RADIUS, SCARE_RADIUS } from './constant
 // angleDiff is used by updateWalk, filled in by Task 4
 import { angleDiff, clampf, makeRng, rnd, smoothstep, type Rng } from '../core/mathutil.ts';
 import type { BrainSignals, Ledge } from '../core/types.ts';
+import type { Arena } from '../core/arena.ts';
 
 export type FlyState = 'walking' | 'idle' | 'grooming' | 'flying' | 'sleeping';
 
@@ -55,6 +56,10 @@ export class Fly {
   stateAge = 0;
   terrain: Ledge[] = [];        // walkable window edges, set by the coordinator
   ledge: Ledge | null = null;   // currently attached window edge
+  // The union of the real display rectangles, when the overlay spans several
+  // monitors. The window is one rectangle but the monitors may not tile it, so
+  // without this the fly could walk into a region that is on no screen.
+  arena: Arena | null = null;
 
   flightFrom: Point = { x: 0, y: 0 };
   flightTo: Point = { x: 0, y: 0 };
@@ -132,7 +137,9 @@ export class Fly {
     }
     if (!chosen) {
       for (let i = 0; i < 16; i++) {
-        target = { x: rnd(this.rng, -hw, hw), y: rnd(this.rng, -hh, hh) };
+        target = this.arena === null
+          ? { x: rnd(this.rng, -hw, hw), y: rnd(this.rng, -hh, hh) }
+          : this.arena.randomPoint(this.rng, EDGE_MARGIN);
         const far = Math.hypot(target.x - this.pos.x, target.y - this.pos.y)
           > (escape ? 350 : 260);
         if (!far) continue;
@@ -408,6 +415,15 @@ export class Fly {
       this.pos.y += Math.sin(this.heading) * v * dt;
       this.pos.x = clampf(this.pos.x, -bounds.width / 2 + 20, bounds.width / 2 - 20);
       this.pos.y = clampf(this.pos.y, -bounds.height / 2 + 20, bounds.height / 2 - 20);
+      // Multi-monitor: a step into the gap between displays is an invisible
+      // wall. Slide back onto the nearest screen and turn around, rather than
+      // walking off into a region that is not rendered anywhere.
+      if (this.arena !== null && !this.arena.contains(this.pos.x, this.pos.y, 20)) {
+        const back = this.arena.clamp(this.pos.x, this.pos.y, 20);
+        this.pos.x = back.x;
+        this.pos.y = back.y;
+        this.heading += Math.PI + rnd(this.rng, -0.6, 0.6);
+      }
       // walked onto a window edge? latch on
       for (const L of this.terrain) {
         if (this.pos.x > L.x0 - 8 && this.pos.x < L.x1 + 8

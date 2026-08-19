@@ -12,6 +12,10 @@ contextBridge.exposeInMainWorld('desktopfly', {
   // it — no frames, no logs, and capturePage() never resolving. invoke/handle
   // has no such race.
   getCircuit: () => ipcRenderer.invoke('circuit'),
+  getArena: () => ipcRenderer.invoke('arena'),
+  onArena: (cb: (a: unknown) => void) => {
+    ipcRenderer.on('arena', (_e, a) => cb(a));
+  },
   onSenses: (cb: (s: unknown) => void) => {
     ipcRenderer.on('senses', (_e, s) => cb(s));
   },
