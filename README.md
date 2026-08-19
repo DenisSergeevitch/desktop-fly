@@ -5,10 +5,12 @@
 <h1 align="center">DesktopFly 🪰</h1>
 
 <p align="center">
-A 3D fruit fly that lives on your macOS desktop — driven by a live spiking
+A 3D fruit fly that lives on your desktop — driven by a live spiking
 simulation of the real <a href="https://codex.flywire.ai">FlyWire</a>
 connectome. It walks across your windows, grooms, sleeps, and decides to flee
 your cursor with the same neurons a real fly uses.
+<br><b>macOS</b> (Swift + SceneKit, below) and <b>Windows</b>
+(<a href="windows/">windows/</a>, Electron + Three.js).
 </p>
 
 <p align="center">
@@ -39,15 +41,16 @@ to stimulate it.
     sensory (wind) neurons
 - **Escape is not scripted.** Your cursor's approach becomes looming input to
   the real LC4/LPLC2 cells; the fly takes off only when the Giant Fiber
-  actually spikes through its real synapses — ~1,200 synapses of feedforward
-  inhibition push back, which is why slow approaches are tolerated and fast
-  lunges trigger escape in ~4 ms, just like the real animal.
+  actually spikes through its real synapses — ~1,400 synapses of feedforward
+  inhibition push back (2,754 inhibitory synapses reach the GF in all), which is
+  why slow approaches are tolerated and fast lunges trigger escape in ~4 ms,
+  just like the real animal.
 
 The body itself is procedural (FlyWire is a brain connectome — no body
 geometry exists), with a tripod gait, visible wing-beat, altitude-scaled
 flight, grooming, and sleep postures.
 
-## Installation
+## Installation (macOS)
 
 Requirements: **macOS 13+**, Xcode Command Line Tools (Swift 5.9+).
 No permissions or entitlements needed — everything it senses
@@ -63,6 +66,45 @@ cd desktop-fly
 A 🪰 item appears in the menu bar; quit from there. The fly wanders your
 desktop on a transparent, click-through overlay — it never intercepts your
 mouse or keyboard.
+
+## Installation (Windows)
+
+A full port lives in [`windows/`](windows/): the same `data/` files, the same
+668-neuron circuit, the same 1 kHz LIF dynamics, with Electron + Three.js in
+place of Cocoa/SceneKit and Win32 senses in place of the macOS ones.
+
+Requirements: **Node 24+**. Nothing else — no Visual Studio, no compiler.
+
+```sh
+cd windows
+npm install
+npm start
+```
+
+A 🪰 icon appears in the notification area; right-click → Quit. Everything the
+macOS build does, this does — the click-through overlay, window title bars as
+walkable ledges, sleep, taps, the brain window with live spikes and
+click-to-stimulate, and a tray menu. `npm run dist` packages it.
+
+Parity is checked against this build's own documented invariants, since the Swift
+target cannot be compiled on Windows: the giant fiber silent across 4 s of rest,
+firing 4 ms after an abrupt loom, the siesta alive, and all 17 `--behaviortest`
+checks passing.
+
+Three deliberate differences:
+
+- **The overlay spans every display**, rather than hopping between them on
+  command, because the Windows desktop is one continuous space. The fly is
+  confined to the union of the real monitor rectangles, so it cannot walk into
+  the gap between two mismatched screens.
+- **CPU load stands in for thermal state.** Windows exposes no dependable
+  thermal API, so "a hot Mac is a fast fly" becomes "a busy PC is a fast fly".
+- **Typing is inferred** from input arriving while the cursor stays still,
+  because `GetLastInputInfo` reports combined input rather than keyboard-only
+  idleness. The privacy property is unchanged: when, never what.
+
+See [`windows/README.md`](windows/README.md) for the diagnostics, packaging and
+the full list of differences.
 
 ## Controls (menu bar 🪰)
 
