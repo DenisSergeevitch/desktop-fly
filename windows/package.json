@@ -1,0 +1,21 @@
+{
+  "name": "desktop-fly-windows",
+  "version": "1.0.0",
+  "description": "DesktopFly for Windows — a 3D fly on your desktop, driven by the real FlyWire connectome",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "simtest": "node test/simtest.js",
+    "behaviortest": "node test/behaviortest.js",
+    "test": "node test/simtest.js && node test/behaviortest.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "three": "^0.169.0",
+    "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "electron": "^32.2.0"
+  }
+}
