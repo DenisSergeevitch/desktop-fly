@@ -251,7 +251,7 @@ func buildFlyModel() -> FlyModel {
 // MARK: - Behavior
 
 final class Fly {
-    enum State { case walking, idle, grooming, flying, sleeping }
+    enum State { case walking, idle, grooming, flying, sleeping, squished }
 
     let model: FlyModel
     var node: SCNNode { model.root }
@@ -270,6 +270,7 @@ final class Fly {
     var stateAge: CGFloat = 0
     var terrain: [Ledge] = []      // walkable window edges, set by the coordinator
     var ledge: Ledge?              // currently attached window edge
+    var timidity: CGFloat = 1      // easy-catch mode shrinks legacy fear radii
 
     var gaitPhasePublic: CGFloat { gaitPhase }
     var walkingIntensity: CGFloat {
@@ -362,6 +363,53 @@ final class Fly {
         model.blurWingR.isHidden = true
     }
 
+    // A well-aimed click while grounded. Terminal: update() ignores the corpse,
+    // so the pose set here (and the guts) persists until the fly is removed.
+    func squish() {
+        state = .squished
+        ledge = nil
+        speed = 0
+        alt = 0
+        pitch = 0
+        backwardTimer = 0
+        dartTimer = 0
+        wingRaise = 0
+        model.blurWingL.isHidden = true
+        model.blurWingR.isHidden = true
+        for leg in model.legs {
+            leg.angle = rnd(-0.55...0.65)
+            leg.lift = 0
+            leg.apply()
+        }
+        for (i, wing) in model.foldedWings.childNodes.enumerated() {
+            let side: CGFloat = i == 0 ? -1 : 1
+            wing.eulerAngles = SCNVector3(rnd(-0.25...0.05), 0, side * rnd(0.5...1.1))
+        }
+        model.abdomen.scale = SCNVector3(1.05, 1.35, 0.75)
+        addGuts()
+        // pressed flat against the glass, slightly spread; the z-scale also
+        // flattens the gut blobs into splat smears
+        node.scale = SCNVector3(FLY_SCALE * 1.3, FLY_SCALE * 1.2, FLY_SCALE * 0.16)
+        node.position = SCNVector3(pos.x, pos.y, 0)
+        node.eulerAngles = SCNVector3(0, 0, heading - .pi / 2)
+    }
+
+    private func addGuts() {
+        // hemolymph is creamy yellow, not red
+        let guts = NSColor(calibratedRed: 0.80, green: 0.74, blue: 0.44, alpha: 0.92)
+        let dark = NSColor(calibratedRed: 0.42, green: 0.33, blue: 0.16, alpha: 0.95)
+        for i in 0..<8 {
+            let g = SCNSphere(radius: rnd(1.5...3.6))
+            g.materials = [mat(i % 3 == 0 ? dark : guts, specular: 0.55, shininess: 0.6)]
+            let blob = SCNNode(geometry: g)
+            let ang = rnd(0...(2 * .pi))
+            let d = rnd(2...12)
+            blob.position = SCNVector3(cos(ang) * d, sin(ang) * d - 3.5, 0.8)
+            blob.scale = SCNVector3(rnd(0.7...1.6), rnd(0.7...1.6), 0.45)
+            node.addChildNode(blob)
+        }
+    }
+
     private func pickNextState() {
         switch state {
         case .walking:
@@ -378,12 +426,13 @@ final class Fly {
                    heading += rnd(-1.5...1.5) }
         case .grooming:
             state = .idle; stateTimer = rnd(0.3...1.0)
-        case .flying, .sleeping:
+        case .flying, .sleeping, .squished:
             break
         }
     }
 
     func update(dt: CGFloat, bounds: CGSize, mouse: CGPoint?, signals: BrainSignals?) {
+        if state == .squished { return }   // dead: no behavior, no gait, no breathing
         time += dt
         scareCooldown = max(0, scareCooldown - dt)
         dartCooldown = max(0, dartCooldown - dt)
@@ -406,9 +455,9 @@ final class Fly {
             if scareCooldown == 0, let m = mouse {
                 // legacy distance-based fear (extra, brainless flies)
                 let mouseDist = hypot(m.x - pos.x, m.y - pos.y)
-                if mouseDist < SCARE_RADIUS {
+                if mouseDist < SCARE_RADIUS * timidity {
                     startFlight(bounds: bounds, awayFrom: m)
-                } else if mouseDist < NERVOUS_RADIUS && state != .walking {
+                } else if mouseDist < NERVOUS_RADIUS * timidity && state != .walking {
                     setState(.walking)
                     heading = atan2(pos.y - m.y, pos.x - m.x) + rnd(-0.4...0.4)
                     speed = rnd(110...150)

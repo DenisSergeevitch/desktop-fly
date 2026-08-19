@@ -445,6 +445,19 @@ func runBehaviorTest() {
                        landed ? "yes" : "NO", maxDS, maxDZ))
     }
 
+    bodyCheck("squish -> inert flattened corpse (even escape can't revive it)") {
+        let fly = Fly(at: CGPoint(x: 10, y: 20))
+        fly.state = .walking; fly.speed = 40
+        fly.squish()
+        let p0 = fly.pos
+        var s = BrainSignals(); s.walkDrive = 1.0; s.escape = true
+        for _ in 0..<120 { fly.update(dt: dt, bounds: bounds, mouse: nil, signals: s) }
+        let flat = fly.node.scale.z < FLY_SCALE * 0.3
+        let still = fly.pos == p0 && fly.state == .squished
+        return (flat && still, String(format: "state=%@ scale.z=%.2f moved=%@",
+                                      "\(fly.state)", fly.node.scale.z, fly.pos == p0 ? "no" : "YES"))
+    }
+
     bodyCheck("circadian curve: siesta + night dips, dawn/dusk peaks") {
         let night = circadianActivity(hour: 3), dawn = circadianActivity(hour: 9)
         let siesta = circadianActivity(hour: 14), dusk = circadianActivity(hour: 18)
@@ -511,6 +524,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var activity: Float = 1
     private var windowLoomL: Float = 0
     private var windowLoomR: Float = 0
+    private var easyMode = false
     private(set) var lastFlyPos = CGPoint.zero
 
     init(bounds: CGSize, sim: LIFSim?) {
@@ -542,9 +556,38 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     func scareAll() {
         enqueue { c in
             c.loomOverride = 0.6   // real stimulus into the real circuit for fly #1
-            for fly in c.flies.dropFirst() where fly.state != .flying {
+            for fly in c.flies.dropFirst() where fly.state != .flying && fly.state != .squished {
                 fly.startFlight(bounds: c.bounds)
             }
+        }
+    }
+
+    // a click landed on a grounded fly: squish it (a flying fly is uncatchable)
+    func trySquish(at p: CGPoint) {
+        enqueue { c in
+            let radius: CGFloat = c.easyMode ? 60 : 30
+            for fly in c.flies where fly.state != .flying && fly.state != .squished {
+                if hypot(p.x - fly.pos.x, p.y - fly.pos.y) < radius {
+                    fly.squish()
+                    break
+                }
+            }
+        }
+    }
+
+    // Easy mode dulls the fly's senses rather than editing its behavior: the
+    // connectome runs unchanged on attenuated threat input, so escapes and
+    // darts become rare instead of impossible.
+    func setEasyMode(_ on: Bool) { enqueue { $0.easyMode = on } }
+
+    // remove corpses; spawn a fresh fly if none are left alive
+    func cleanupSquished() {
+        enqueue { c in
+            let dead = c.flies.filter { $0.state == .squished }
+            guard !dead.isEmpty else { return }
+            for f in dead { f.node.removeFromParentNode() }
+            c.flies.removeAll { $0.state == .squished }
+            if c.flies.isEmpty { c.addFlyNow() }
         }
     }
     func escapeTest() { enqueue { $0.loomOverride = 0.6 } }
@@ -595,7 +638,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             let d = hypot(p.x - fly.pos.x, p.y - fly.pos.y)
             let strength = Float(clampf(1 - d / 520, 0, 1))
             if strength > 0.05 {
-                sim.stimulate(sim.sens, strength: 0.15 + strength * 0.35, durationMs: 130)
+                let gain: Float = c.easyMode ? 0.3 : 1   // near-misses barely startle
+                sim.stimulate(sim.sens, strength: (0.15 + strength * 0.35) * gain, durationMs: 130)
             }
         }
     }
@@ -650,14 +694,17 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         lastTime = t
 
         var signals: BrainSignals? = nil
-        if let sim = sim, let first = flies.first {
+        // a squished fly #1 means a squished brain: stop stepping the sim so
+        // the brain window flatlines instead of spiking inside a corpse
+        if let sim = sim, let first = flies.first, first.state != .squished {
             let sensory = computeLoom(fly: first, mouse: mouse, dt: dt)
             let decayF = Float(exp(-4 * Double(dt)))
             windowLoomL *= decayF
             windowLoomR *= decayF
-            sim.loomL = max(sensory.l, windowLoomL)
-            sim.loomR = max(sensory.r, windowLoomR)
-            sim.airPuff = max(sensory.puff, Float(typingLevel * 0.30))
+            let threatGate: Float = easyMode ? 0.18 : 1
+            sim.loomL = max(sensory.l, windowLoomL) * threatGate
+            sim.loomR = max(sensory.r, windowLoomR) * threatGate
+            sim.airPuff = max(sensory.puff, Float(typingLevel * 0.30)) * threatGate
             // body -> brain: leg proprioception from the current gait
             sim.gaitDrive = Float(first.walkingIntensity)
             sim.gaitPhase = Float(first.gaitPhasePublic)
@@ -673,13 +720,14 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             sim.step(steps)
 
             var s = signalBuilder.make(sim, dt: dt)
-            s.tempo = tempo
+            s.tempo = tempo * (easyMode ? 0.55 : 1)   // a sluggish, catchable fly
             s.sleep = sleepy
             signals = s
         }
 
         for (i, fly) in flies.enumerated() {
             fly.terrain = terrain
+            fly.timidity = easyMode ? 0.4 : 1
             fly.update(dt: dt, bounds: bounds, mouse: mouse, signals: i == 0 ? signals : nil)
         }
         if let first = flies.first {
@@ -706,6 +754,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let windowSense = WindowSense()
     var typingLevel: CGFloat = 0
     var paused = false
+    var easyModeOn = false
     var brainWC: BrainWindowController?
     var dataInfo = "no data — run etl.py"
     var screenFrame = NSRect.zero
@@ -795,8 +844,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self else { return }
             let loc = NSEvent.mouseLocation
-            self.coordinator.injectTap(at: CGPoint(x: loc.x - self.screenFrame.midX,
-                                                   y: loc.y - self.screenFrame.midY))
+            let p = CGPoint(x: loc.x - self.screenFrame.midX,
+                            y: loc.y - self.screenFrame.midY)
+            // direct hit on a grounded fly squishes it; a near miss is still a
+            // substrate tap that startles it (both drain on the same frame)
+            self.coordinator.trySquish(at: p)
+            self.coordinator.injectTap(at: p)
         }
 
         // if the current display disappears, retreat to the main screen
@@ -848,6 +901,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Add Fly", #selector(addFly), "a"))
         menu.addItem(item("Remove Fly", #selector(removeFly), "r"))
         menu.addItem(item("Scare Flies", #selector(scareAll), "s"))
+        menu.addItem(item("Clean Up Squished", #selector(cleanupSquished), "n"))
+        menu.addItem(item("Easy Catch Mode", #selector(toggleEasyMode(_:)), "k"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -864,6 +919,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         wc.isVisible ? wc.hide() : wc.show()
     }
     @objc func escapeTest() { coordinator.escapeTest() }
+    @objc func cleanupSquished() { coordinator.cleanupSquished() }
+    @objc func toggleEasyMode(_ sender: NSMenuItem) {
+        easyModeOn.toggle()
+        sender.state = easyModeOn ? .on : .off
+        coordinator.setEasyMode(easyModeOn)
+    }
     @objc func addFly() { coordinator.addFly() }
     @objc func removeFly() { coordinator.removeFly() }
     @objc func scareAll() { coordinator.scareAll() }
