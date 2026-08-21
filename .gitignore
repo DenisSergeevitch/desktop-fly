@@ -3,3 +3,7 @@ DesktopFly
 *.log
 nohup.out
 /*.png
+tmp/
+win/**/bin/
+win/**/obj/
+win/**/*.user
