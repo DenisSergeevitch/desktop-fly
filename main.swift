@@ -710,6 +710,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var dataInfo = "no data — run etl.py"
     var screenFrame = NSRect.zero
     var moveDisplayItem: NSMenuItem?
+    var brainFullscreenItem: NSMenuItem?
+    var brainHintItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NSScreen.main else { fatalError("no screen") }
@@ -752,6 +754,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let sim = sim, let pts = brainPoints {
             let wc = BrainWindowController(points: pts, sim: sim, screen: screen)
+            wc.onFullscreenChange = { [weak self] in self?.syncFullscreenItem() }
             wc.show()
             brainWC = wc
         }
@@ -840,6 +843,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(item("Pause", #selector(togglePause(_:)), "p"))
         menu.addItem(item("Show/Hide Brain", #selector(toggleBrain), "b"))
+        let full = item("Fullscreen Brain", #selector(toggleBrainFullscreen), "f")
+        menu.addItem(full)
+        brainFullscreenItem = full
+        let hint = item("Hide Brain Hint", #selector(toggleBrainHint), "h")
+        menu.addItem(hint)
+        brainHintItem = hint
         menu.addItem(item("Escape Test (loom)", #selector(escapeTest), "e"))
         let move = item("Move to Next Display", #selector(moveToNextDisplay), "d")
         menu.addItem(move)
@@ -862,6 +871,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleBrain() {
         guard let wc = brainWC else { return }
         wc.isVisible ? wc.hide() : wc.show()
+    }
+    @objc func toggleBrainFullscreen() {
+        guard let wc = brainWC else { return }
+        wc.toggleFullscreen()
+        syncFullscreenItem()
+    }
+    @objc func toggleBrainHint() {
+        guard let wc = brainWC else { return }
+        wc.toggleHint()
+        brainHintItem?.title = wc.isHintVisible ? "Hide Brain Hint" : "Show Brain Hint"
+    }
+    func syncFullscreenItem() {
+        guard let wc = brainWC else { return }
+        brainFullscreenItem?.title = wc.isFullscreen ? "Exit Fullscreen Brain" : "Fullscreen Brain"
     }
     @objc func escapeTest() { coordinator.escapeTest() }
     @objc func addFly() { coordinator.addFly() }
