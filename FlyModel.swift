@@ -11,7 +11,36 @@ let EDGE_MARGIN: CGFloat = 50
 let SCARE_RADIUS: CGFloat = 110        // legacy behavior (non-connectome flies) only
 let NERVOUS_RADIUS: CGFloat = 240      // legacy behavior only
 
+/// Reference frame rate the existing constants were tuned at.
+let TUNED_HZ: CGFloat = 60
+/// Heading random-walk amplitude, rad/sqrt(s). The variance of a random walk grows
+/// with dt, not dt^2, so the old `rnd(-1...1) * 1.6 * dt` form made the fly
+/// measurably twitchier on a 60 Hz display than on a 120 Hz one. Dividing by
+/// sqrt(TUNED_HZ) reproduces the old 60 Hz spread exactly.
+let WANDER_JITTER: CGFloat = 1.6 / sqrt(TUNED_HZ)
+/// Same recalibration of the old ledge-walking `0.2 * dt`.
+let LEDGE_JITTER: CGFloat = 0.2 / sqrt(TUNED_HZ)
+
 func rnd(_ range: ClosedRange<CGFloat>) -> CGFloat { CGFloat.random(in: range) }
+/// Frame-rate-independent form of the `min(1, k * dt)` idiom used throughout this
+/// file, for both first-order lags and per-frame event probabilities.
+///
+/// `k` keeps its original meaning, so call sites are unchanged: at dt = 1/60 this
+/// returns exactly `k/60`, the value the constants were tuned against. Away from
+/// 60 Hz it follows the geometric decay those constants imply instead of the
+/// straight line, which is what made behaviour drift with refresh rate — at the
+/// 50 ms dt cap in main.swift the old form converged 27% too fast (0.50 vs 0.39
+/// for k = 10).
+///
+/// Writing it as `1 - exp(-k*dt)` would also be frame-rate independent, but it is
+/// a *different* continuous process: it would change the 60 Hz behaviour by 2-8%
+/// across the k values used here. This form is the one that leaves 60 Hz alone.
+@inline(__always)
+func lag(_ k: CGFloat, _ dt: CGFloat) -> CGFloat {
+    let perFrame = min(1, k / TUNED_HZ)
+    guard perFrame < 1 else { return 1 }
+    return 1 - pow(1 - perFrame, TUNED_HZ * dt)
+}
 func clampf(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat { min(hi, max(lo, v)) }
 func angleDiff(_ from: CGFloat, _ to: CGFloat) -> CGFloat {
     var d = (to - from).truncatingRemainder(dividingBy: 2 * .pi)
@@ -492,14 +521,14 @@ final class Fly {
         if state == .walking {
             if dartTimer == 0 && backwardTimer == 0 {
                 let target = (14 + s.walkDrive * 55) * s.tempo
-                speed += (target - speed) * min(1, 3 * dt)
+                speed += (target - speed) * lag(3, dt)
             }
             if ledge == nil { heading += s.turnBias * dt }   // DNa01/DNa02 steering
         }
         // spontaneous takeoff, gated on whole-population arousal; flight
         // altitude/effort scales with how aroused the network is
         let flightChance: CGFloat = s.arousal > 0.5 ? 0.6 : 0.005
-        if state == .walking && rnd(0...1) < flightChance * dt {
+        if state == .walking && rnd(0...1) < lag(flightChance, dt) {
             startFlight(bounds: bounds, effort: 0.35 + s.arousal * 0.6)
         }
     }
@@ -519,21 +548,21 @@ final class Fly {
         }
         if let L = ledge {
             // walk along the window edge
-            heading += rnd(-1...1) * 0.2 * dt
+            heading += rnd(-1...1) * LEDGE_JITTER * sqrt(dt)
             let along: CGFloat = cos(heading) >= 0 ? 0 : .pi
-            heading += angleDiff(heading, along) * min(1, 6 * dt)
+            heading += angleDiff(heading, along) * lag(6, dt)
             pos.x += cos(heading) * effectiveSpeed * dt
-            pos.y += (L.y - pos.y) * min(1, 10 * dt)
+            pos.y += (L.y - pos.y) * lag(10, dt)
             if pos.x <= L.x0 + 6 && cos(heading) < 0 { heading = 0 }
             if pos.x >= L.x1 - 6 && cos(heading) > 0 { heading = .pi }
             pos.x = clampf(pos.x, L.x0, L.x1)
-            if rnd(0...1) < 0.05 * dt { ledge = nil }   // wander off the edge
+            if rnd(0...1) < lag(0.05, dt) { ledge = nil }   // wander off the edge
         } else {
-            heading += rnd(-1...1) * 1.6 * dt
+            heading += rnd(-1...1) * WANDER_JITTER * sqrt(dt)
             let hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN
             if abs(pos.x) > hw || abs(pos.y) > hh {
                 let toCenter = atan2(-pos.y, -pos.x)
-                heading += angleDiff(heading, toCenter) * min(1, 4 * dt)
+                heading += angleDiff(heading, toCenter) * lag(4, dt)
             }
             let v = effectiveSpeed
             pos.x += cos(heading) * v * dt
@@ -542,7 +571,7 @@ final class Fly {
             pos.y = clampf(pos.y, -bounds.height / 2 + 20, bounds.height / 2 - 20)
             // walked onto a window edge? latch on
             for L in terrain where pos.x > L.x0 - 8 && pos.x < L.x1 + 8 && abs(pos.y - L.y) < 20 {
-                if rnd(0...1) < 0.9 * dt {
+                if rnd(0...1) < lag(0.9, dt) {
                     ledge = L
                     heading = cos(heading) >= 0 ? 0 : .pi
                     break
@@ -570,7 +599,7 @@ final class Fly {
             pos.x = flightTo.x + sin(time * 26) * 1.2
             pos.y = flightTo.y + cos(time * 22) * 1.0
             pitch = clampf(alt * 0.4, 0, 0.35)   // gentle nose-up flare
-            alt += (0 - alt) * min(1, 9 * dt)
+            alt += (0 - alt) * lag(9, dt)
             applyAltitude()
             if alt < 0.035 { pos = flightTo; land() }
             return
@@ -594,7 +623,7 @@ final class Fly {
         let fallEnv = min((1 - flightT) / 0.3, 1)
         let target = effortCurrent * min(riseEnv, fallEnv) * (0.85 + 0.15 * sin(time * 7))
         pitch = clampf((target - alt) * 2.5, -0.45, 0.45)   // nose up while climbing
-        alt += (target - alt) * min(1, 6 * dt)
+        alt += (target - alt) * lag(6, dt)
         // higher = closer to the viewer = bigger, and the shadow slides away
         applyAltitude()
     }
@@ -627,21 +656,21 @@ final class Fly {
                     leg.angle = 0.45 + 0.25 * sin(time * 20 + leg.swingSign * 1.3)
                     leg.lift = 0.55 + 0.15 * sin(time * 22)
                 } else {
-                    leg.angle += (0 - leg.angle) * min(1, 8 * dt)
-                    leg.lift += (0 - leg.lift) * min(1, 8 * dt)
+                    leg.angle += (0 - leg.angle) * lag(8, dt)
+                    leg.lift += (0 - leg.lift) * lag(8, dt)
                 }
                 leg.apply()
             }
         } else if state == .flying {
             for leg in model.legs {
-                leg.angle += (-0.35 - leg.angle) * min(1, 6 * dt)
-                leg.lift += (0.5 - leg.lift) * min(1, 6 * dt)
+                leg.angle += (-0.35 - leg.angle) * lag(6, dt)
+                leg.lift += (0.5 - leg.lift) * lag(6, dt)
                 leg.apply()
             }
         } else {
             for leg in model.legs {
-                leg.angle += (0 - leg.angle) * min(1, 10 * dt)
-                leg.lift += (0 - leg.lift) * min(1, 10 * dt)
+                leg.angle += (0 - leg.angle) * lag(10, dt)
+                leg.lift += (0 - leg.lift) * lag(10, dt)
                 leg.apply()
             }
         }
@@ -653,7 +682,7 @@ final class Fly {
             if !model.foldedWings.isHidden {
                 let raiseTarget: CGFloat = (state != .sleeping
                     && (liveWing > 0.7 || (brainLive && dartTimer > 0))) ? 1 : 0
-                wingRaise += (raiseTarget - wingRaise) * min(1, 8 * dt)
+                wingRaise += (raiseTarget - wingRaise) * lag(8, dt)
                 if wingRaise > 0.01 {
                     for (i, wing) in model.foldedWings.childNodes.enumerated() {
                         let side: CGFloat = i == 0 ? -1 : 1

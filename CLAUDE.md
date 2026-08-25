@@ -23,7 +23,7 @@ SceneKit; the brain data is real.
 ./build.sh                     # bare swiftc, -swift-version 5, no Xcode project
 ./DesktopFly                   # menu-bar 🪰; quit from there
 ./DesktopFly --simtest         # circuit invariants (MUST pass after sim/etl changes)
-./DesktopFly --behaviortest    # 17 end-to-end sim→body checks (MUST pass after behavior changes)
+./DesktopFly --behaviortest    # 18 end-to-end sim→body checks (MUST pass after behavior changes)
 ./DesktopFly --snapshot f.png  # offscreen fly render
 ./DesktopFly --brainshot b.png # offscreen brain render
 ```

@@ -452,6 +452,36 @@ func runBehaviorTest() {
         return (ok, String(format: "3h %.2f, 9h %.2f, 14h %.2f, 18h %.2f", night, dawn, siesta, dusk))
     }
 
+    // Guards both halves of the frame-rate fix. Before it, the first check was off
+    // by 27% at the 50 ms dt cap and the second differed by sqrt(2) between a
+    // 60 Hz and a 120 Hz display.
+    bodyCheck("body timestep is frame-rate independent") {
+        // 0. at the rate the constants were tuned at, lag() must reproduce the old
+        //    `min(1, k * dt)` value exactly, or this stops being a pure bug fix
+        var exact60 = true
+        for k in [0.05, 0.9, 3, 4, 6, 8, 9, 10] as [CGFloat] {
+            exact60 = exact60 && abs(lag(k, 1 / TUNED_HZ) - k / TUNED_HZ) < 1e-12
+        }
+        // 1. a first-order lag must give the same result however it is subdivided
+        var fine: CGFloat = 0, coarse: CGFloat = 0
+        for _ in 0..<8 { fine += (1 - fine) * lag(10, 0.1 / 8) }
+        coarse += (1 - coarse) * lag(10, 0.1)
+        // 2. the heading random walk must have the same spread at any frame rate
+        func spread(_ dt: CGFloat) -> CGFloat {
+            var sum: CGFloat = 0
+            for _ in 0..<4000 {
+                var h: CGFloat = 0, t: CGFloat = 0
+                while t < 2 { h += rnd(-1...1) * WANDER_JITTER * sqrt(dt); t += dt }
+                sum += h * h
+            }
+            return sqrt(sum / 4000)
+        }
+        let s60 = spread(1.0 / 60), s120 = spread(1.0 / 120)
+        let ok = exact60 && abs(fine - coarse) < 1e-6 && abs(s60 - s120) / s60 < 0.1
+        return (ok, String(format: "60Hz exact=%@, lag 8x12.5ms %.6f vs 1x100ms %.6f, wander sd %.3f @60Hz vs %.3f @120Hz",
+                           exact60 ? "yes" : "NO", fine, coarse, s60, s120))
+    }
+
     print(failures == 0 ? "ALL BEHAVIOR TESTS PASS" : "\(failures) FAILURES")
     exit(failures == 0 ? 0 : 1)
 }
@@ -468,7 +498,7 @@ final class SignalBuilder {
         // Slow adaptation (tau ~8 s): the connectome's persistent left/right
         // wiring asymmetry is adapted out, so steady-state walking is straight
         // and only transient DNa asymmetries (visual, stimulation) steer.
-        dnaBaseline += (diff - dnaBaseline) * Float(min(1, dt / 8))
+        dnaBaseline += (diff - dnaBaseline) * Float(lag(1.0 / 8, dt))
         var s = BrainSignals()
         s.escape = sim.consumeGF()
         s.nervous = clampf(CGFloat(sim.rateLoom) / 80, 0, 1)
@@ -501,6 +531,8 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var msAccumulator: Double = 0
     private var prevMouse: CGPoint?
     private var mouseVel = CGPoint.zero
+    private var mouseVelRaw = CGPoint.zero   // last measurement, held between samples
+    private var mouseSampleDt: CGFloat = 0   // real time since that measurement
     private var loomOverride: CGFloat = 0
 
     // environment senses (written from main-thread timers, read in render loop)
@@ -606,11 +638,28 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private func computeLoom(fly: Fly, mouse: CGPoint?, dt: CGFloat) -> (l: Float, r: Float, puff: Float) {
         guard let m = mouse else { return (0, 0, 0) }
         if let pm = prevMouse, dt > 0 {
-            let v = CGPoint(x: (m.x - pm.x) / dt, y: (m.y - pm.y) / dt)
-            mouseVel.x += (v.x - mouseVel.x) * 0.4
-            mouseVel.y += (v.y - mouseVel.y) * 0.4
+            // The cursor is sampled by a 30 Hz timer while this runs once per
+            // rendered frame (up to 120), so most frames see the same position.
+            // Dividing by the render dt turned one 30 Hz step into a spike whose
+            // height scaled with refresh rate; measure over the real interval
+            // between samples instead, and re-measure if the cursor goes quiet so
+            // a stopped cursor decays to zero rather than holding its last speed.
+            mouseSampleDt += dt
+            if m != pm || mouseSampleDt >= 1.0 / 30 {
+                mouseVelRaw = CGPoint(x: (m.x - pm.x) / mouseSampleDt,
+                                      y: (m.y - pm.y) / mouseSampleDt)
+                prevMouse = m
+                mouseSampleDt = 0
+            }
+            // Smoothing runs every frame, frame-rate-corrected: 24/60 = the old
+            // fixed per-frame 0.4, so 60 Hz is unchanged.
+            let k = lag(24, dt)
+            mouseVel.x += (mouseVelRaw.x - mouseVel.x) * k
+            mouseVel.y += (mouseVelRaw.y - mouseVel.y) * k
+        } else {
+            prevMouse = m
+            mouseSampleDt = 0
         }
-        prevMouse = m
         let rel = CGPoint(x: m.x - fly.pos.x, y: m.y - fly.pos.y)
         let dist = max(20, hypot(rel.x, rel.y))
         // radial approach speed (positive = cursor closing in)
