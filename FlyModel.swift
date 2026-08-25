@@ -11,6 +11,29 @@ let EDGE_MARGIN: CGFloat = 50
 let SCARE_RADIUS: CGFloat = 110        // legacy behavior (non-connectome flies) only
 let NERVOUS_RADIUS: CGFloat = 240      // legacy behavior only
 
+// MARK: - Measured walking kinematics
+//
+// A walking fly does not steer continuously. It goes nearly straight and changes
+// heading in discrete body saccades, with slow sub-threshold drift in between —
+// Geurten, Jähde, Rosner & Egelhaaf 2014 (Front Behav Neurosci 8:365,
+// 10.3389/fnbeh.2014.00365) scored 1140 saccades against 3348 slow turns in
+// freely walking Canton-S at 500 fps. So the shape here is right; the numbers
+// were not. The code snapped the heading by up to 86 deg in a single step.
+
+/// Body-saccade amplitude, rad. Measured mean is ~15 deg; this range averages to
+/// it. Sign is drawn separately (Geurten et al. 2014).
+let SACCADE_MIN: CGFloat = 0.09   // 5 deg
+let SACCADE_MAX: CGFloat = 0.44   // 25 deg
+/// Body-saccade duration, s — measured 40-120 ms, median 90 (Geurten et al. 2014).
+/// A 15 deg turn spent over it peaks near 170 deg/s, just under the 200 deg/s
+/// those authors use as the saccade detection threshold.
+let SACCADE_DUR: CGFloat = 0.09
+/// Swing (leg-in-air) duration, s. Nearly constant across walking speed — it is
+/// stance that scales as 1/v — Mendes, Bartos, Akay, Márka & Mann 2013
+/// (eLife 2:e00231, 10.7554/eLife.00231, Table 2). The gait used a fixed 40%
+/// swing fraction instead, which stretches the swing at low speed.
+let SWING_DUR: CGFloat = 0.035
+
 func rnd(_ range: ClosedRange<CGFloat>) -> CGFloat { CGFloat.random(in: range) }
 func clampf(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat { min(hi, max(lo, v)) }
 func angleDiff(_ from: CGFloat, _ to: CGFloat) -> CGFloat {
@@ -266,6 +289,9 @@ final class Fly {
     var scareCooldown: CGFloat = 0
     var dartCooldown: CGFloat = 0
     var backwardTimer: CGFloat = 0
+    /// Radians of body saccade not yet spent, and the rate it is spent at.
+    private var saccade: CGFloat = 0
+    private var saccadeRate: CGFloat = 0
     var dartTimer: CGFloat = 0
     var stateAge: CGFloat = 0
     var terrain: [Ledge] = []      // walkable window edges, set by the coordinator
@@ -362,6 +388,26 @@ final class Fly {
         model.blurWingR.isHidden = true
     }
 
+    /// Queue a body saccade instead of snapping the heading. Escape turns do NOT
+    /// go through this: a fleeing fly extends its legs in 3.33 ms (Card & Dickinson
+    /// 2008, J Exp Biol 211:341, 10.1242/jeb.012682) and must stay instant.
+    private func startSaccade() {
+        saccade = (rnd(0...1) < 0.5 ? -1 : 1) * rnd(SACCADE_MIN...SACCADE_MAX)
+        saccadeRate = saccade / SACCADE_DUR
+    }
+
+    private func stepSaccade(_ dt: CGFloat) {
+        guard saccade != 0 else { return }
+        let step = saccadeRate * dt
+        if abs(step) >= abs(saccade) {
+            heading += saccade
+            saccade = 0
+        } else {
+            heading += step
+            saccade -= step
+        }
+    }
+
     private func pickNextState() {
         switch state {
         case .walking:
@@ -369,13 +415,13 @@ final class Fly {
             if r < 0.30 { state = .idle; stateTimer = rnd(0.8...3); speed = 0 }
             else if r < 0.55 {
                 stateTimer = rnd(0.3...0.8); speed = rnd(95...150)
-                heading += rnd(-1.2...1.2)
+                startSaccade()
             } else { stateTimer = rnd(1.5...5); speed = rnd(18...45) }
         case .idle:
             let r = rnd(0...1)
             if r < 0.35 { state = .grooming; stateTimer = rnd(1.0...2.5) }
             else { state = .walking; stateTimer = rnd(1.5...5); speed = rnd(18...45)
-                   heading += rnd(-1.5...1.5) }
+                   startSaccade() }
         case .grooming:
             state = .idle; stateTimer = rnd(0.3...1.0)
         case .flying, .sleeping:
@@ -398,8 +444,10 @@ final class Fly {
         liveWing = signals?.wingDrive ?? 0
 
         if state == .flying {
+            saccade = 0            // airborne heading is geometric, not a walk saccade
             updateFlight(dt: dt)
         } else if let s = signals {
+            stepSaccade(dt)
             brainBehavior(s, dt: dt, bounds: bounds, mouse: mouse)
             if state == .walking { updateWalk(dt: dt, bounds: bounds) }
         } else {
@@ -410,6 +458,7 @@ final class Fly {
                     startFlight(bounds: bounds, awayFrom: m)
                 } else if mouseDist < NERVOUS_RADIUS && state != .walking {
                     setState(.walking)
+                    saccade = 0        // fleeing turns are instant, not saccadic
                     heading = atan2(pos.y - m.y, pos.x - m.x) + rnd(-0.4...0.4)
                     speed = rnd(110...150)
                     stateTimer = rnd(0.4...0.9)
@@ -417,6 +466,7 @@ final class Fly {
                 }
             }
             if state != .flying {
+                stepSaccade(dt)
                 stateTimer -= dt
                 if stateTimer <= 0 {
                     if state == .walking && rnd(0...1) < 0.10 { startFlight(bounds: bounds) }
@@ -461,8 +511,9 @@ final class Fly {
             ledge = nil
             setState(.walking)
             if let m = mouse {
+                saccade = 0        // fleeing turns are instant, not saccadic
                 heading = atan2(pos.y - m.y, pos.x - m.x) + rnd(-0.4...0.4)
-            } else { heading += rnd(-1.5...1.5) }
+            } else { startSaccade() }
             speed = rnd(110...155)
             dartTimer = rnd(0.4...0.9)
             dartCooldown = 1.2
@@ -478,7 +529,7 @@ final class Fly {
         // DNp09 (forward-walking command) hysteresis
         if state == .idle, s.walkDrive > 0.22, stateAge > 0.4 {
             setState(.walking)
-            heading += rnd(-0.8...0.8)
+            startSaccade()
         } else if state == .walking, dartTimer == 0, s.walkDrive < 0.08, stateAge > 0.5 {
             setState(.idle)
             speed = 0
@@ -607,7 +658,9 @@ final class Fly {
             let stride = max(5, 2 * amp * 13)
             let freq = clampf(v / stride, 3, 11)
             gaitPhase = (gaitPhase + freq * dt).truncatingRemainder(dividingBy: 1)
-            let stanceFrac: CGFloat = 0.6
+            // Swing lasts a near-constant ~35 ms whatever the speed; it is stance
+            // that shortens as the fly speeds up. A fixed fraction did the opposite.
+            let stanceFrac = clampf(1 - SWING_DUR * freq, 0.35, 0.9)
             for leg in model.legs {
                 let p = (gaitPhase + leg.phase).truncatingRemainder(dividingBy: 1)
                 if p < stanceFrac {
