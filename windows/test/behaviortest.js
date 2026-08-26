@@ -1,12 +1,13 @@
 // behaviortest.js — port of runBehaviorTest() from main.swift.
-// 17 end-to-end sim -> body checks. MUST pass after any behavior change.
+// 18 end-to-end sim -> body checks. MUST pass after any behavior change.
 //   node test/behaviortest.js
 
 import { loadBrainData } from '../src/data.js';
 import { LIFSim, makeSignals } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
-import { Fly, FLY_SCALE } from '../src/flymodel.js';
+import { Fly, FLY_SCALE, WANDER_JITTER } from '../src/flymodel.js';
 import { circadianActivity, makeLedge } from '../src/environment.js';
+import { rnd, lag, TUNED_HZ } from '../src/util.js';
 
 const data = loadBrainData();
 if (!data) { process.stderr.write('no data/ — run etl.py first\n'); process.exit(1); }
@@ -243,6 +244,36 @@ bodyCheck('circadian curve: siesta + night dips, dawn/dusk peaks', () => {
   const siesta = circadianActivity(14), dusk = circadianActivity(18);
   const ok = night < 0.4 && dawn > 0.9 && siesta < 0.7 && siesta > 0.3 && dusk > 0.9;
   return [ok, `3h ${f(night)}, 9h ${f(dawn)}, 14h ${f(siesta)}, 18h ${f(dusk)}`];
+});
+
+// Guards both halves of the frame-rate fix (mirrors the Swift suite). Before
+// it, the first check was off by 27% at the 50 ms dt cap and the second
+// differed by sqrt(2) between a 60 Hz and a 120 Hz display.
+bodyCheck('body timestep is frame-rate independent', () => {
+  // 0. at the rate the constants were tuned at, lag() must reproduce the old
+  //    `Math.min(1, k * dt)` value exactly, or this stops being a pure bug fix
+  let exact60 = true;
+  for (const k of [0.05, 0.9, 3, 4, 6, 8, 9, 10]) {
+    exact60 = exact60 && Math.abs(lag(k, 1 / TUNED_HZ) - k / TUNED_HZ) < 1e-12;
+  }
+  // 1. a first-order lag must give the same result however it is subdivided
+  let fine = 0, coarse = 0;
+  for (let i = 0; i < 8; i++) fine += (1 - fine) * lag(10, 0.1 / 8);
+  coarse += (1 - coarse) * lag(10, 0.1);
+  // 2. the heading random walk must have the same spread at any frame rate
+  function spread(sdt) {
+    let sum = 0;
+    for (let i = 0; i < 4000; i++) {
+      let h = 0, t = 0;
+      while (t < 2) { h += rnd(-1, 1) * WANDER_JITTER * Math.sqrt(sdt); t += sdt; }
+      sum += h * h;
+    }
+    return Math.sqrt(sum / 4000);
+  }
+  const s60 = spread(1 / 60), s120 = spread(1 / 120);
+  const ok = exact60 && Math.abs(fine - coarse) < 1e-6 && Math.abs(s60 - s120) / s60 < 0.1;
+  return [ok, `60Hz exact=${exact60 ? 'yes' : 'NO'}, lag 8x12.5ms ${fine.toFixed(6)} `
+    + `vs 1x100ms ${coarse.toFixed(6)}, wander sd ${s60.toFixed(3)} @60Hz vs ${s120.toFixed(3)} @120Hz`];
 });
 
 console.log(failures === 0 ? 'ALL BEHAVIOR TESTS PASS' : `${failures} FAILURES`);

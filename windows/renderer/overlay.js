@@ -8,7 +8,7 @@ import * as THREE from '../node_modules/three/build/three.module.js';
 import { LIFSim, SpikeBus } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
 import { Fly, SHADOWS_ENABLED } from '../src/flymodel.js';
-import { clampf, rnd } from '../src/util.js';
+import { clampf, rnd, lag } from '../src/util.js';
 
 const api = window.flyAPI;
 
@@ -87,6 +87,8 @@ let paused = false;
 let mouseScene = null;
 let prevMouse = null;
 const mouseVel = { x: 0, y: 0 };
+const mouseVelRaw = { x: 0, y: 0 };   // last measurement, held between samples
+let mouseSampleDt = 0;                // real time since that measurement
 let loomOverride = 0;
 let msAccumulator = 0;
 
@@ -195,11 +197,28 @@ function injectTap(p) {
 function computeLoom(fly, mouse, dt) {
   if (!mouse) return { l: 0, r: 0, puff: 0 };
   if (prevMouse && dt > 0) {
-    const vx = (mouse.x - prevMouse.x) / dt, vy = (mouse.y - prevMouse.y) / dt;
-    mouseVel.x += (vx - mouseVel.x) * 0.4;
-    mouseVel.y += (vy - mouseVel.y) * 0.4;
+    // The cursor arrives from a 30 Hz poll in the main process while this runs
+    // once per rendered frame (up to 120), so most frames see the same
+    // position. Dividing by the render dt turned one 30 Hz step into a spike
+    // whose height scaled with refresh rate; measure over the real interval
+    // between samples instead, and re-measure if the cursor goes quiet so a
+    // stopped cursor decays to zero rather than holding its last speed.
+    mouseSampleDt += dt;
+    if (mouse.x !== prevMouse.x || mouse.y !== prevMouse.y || mouseSampleDt >= 1 / 30) {
+      mouseVelRaw.x = (mouse.x - prevMouse.x) / mouseSampleDt;
+      mouseVelRaw.y = (mouse.y - prevMouse.y) / mouseSampleDt;
+      prevMouse = { x: mouse.x, y: mouse.y };
+      mouseSampleDt = 0;
+    }
+    // Smoothing runs every frame, frame-rate-corrected: 24/60 = the old fixed
+    // per-frame 0.4, so 60 Hz is unchanged.
+    const k = lag(24, dt);
+    mouseVel.x += (mouseVelRaw.x - mouseVel.x) * k;
+    mouseVel.y += (mouseVelRaw.y - mouseVel.y) * k;
+  } else {
+    prevMouse = { x: mouse.x, y: mouse.y };
+    mouseSampleDt = 0;
   }
-  prevMouse = { x: mouse.x, y: mouse.y };
   const rel = { x: mouse.x - fly.pos.x, y: mouse.y - fly.pos.y };
   const dist = Math.max(20, Math.hypot(rel.x, rel.y));
   // radial approach speed (positive = cursor closing in)

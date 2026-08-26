@@ -2,7 +2,7 @@
 // Converts sim population rates into body commands. Shared by the app loop and
 // the behavior test so both exercise the identical mapping.
 
-import { clampf } from './util.js';
+import { clampf, lag } from './util.js';
 import { makeSignals } from './sim.js';
 
 export class SignalBuilder {
@@ -13,7 +13,7 @@ export class SignalBuilder {
     // Slow adaptation (tau ~8 s): the connectome's persistent left/right
     // wiring asymmetry is adapted out, so steady-state walking is straight
     // and only transient DNa asymmetries (visual, stimulation) steer.
-    this.dnaBaseline += (diff - this.dnaBaseline) * Math.min(1, dt / 8);
+    this.dnaBaseline += (diff - this.dnaBaseline) * lag(1 / 8, dt);
     const s = makeSignals();
     s.escape = sim.consumeGF();
     s.nervous = clampf(sim.rateLoom / 80, 0, 1);

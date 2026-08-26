@@ -15,7 +15,7 @@
 // relative rather than bare so the same module resolves in Node (tests)
 // and in the renderer without an inline importmap
 import * as THREE from '../node_modules/three/build/three.module.js';
-import { rnd, clampf, angleDiff, smoothstep } from './util.js';
+import { rnd, clampf, angleDiff, smoothstep, lag, TUNED_HZ } from './util.js';
 import { makeSignals } from './sim.js';
 
 export const SHADOWS_ENABLED = true;
@@ -27,6 +27,38 @@ export const EDGE_MARGIN = 50;
 export const EDGE_CLAMP = 45;
 export const SCARE_RADIUS = 110;     // legacy behavior (non-connectome flies) only
 export const NERVOUS_RADIUS = 240;   // legacy behavior only
+
+// Heading random-walk amplitude, rad/sqrt(s). The variance of a random walk
+// grows with dt, not dt^2, so the old `rnd(-1, 1) * 1.6 * dt` form made the
+// fly measurably twitchier on a 60 Hz display than on a 120 Hz one. Dividing
+// by sqrt(TUNED_HZ) reproduces the old 60 Hz spread exactly.
+export const WANDER_JITTER = 1.6 / Math.sqrt(TUNED_HZ);
+// Same recalibration of the old ledge-walking `0.2 * dt`.
+export const LEDGE_JITTER = 0.2 / Math.sqrt(TUNED_HZ);
+
+// MARK: - Measured walking kinematics
+//
+// A walking fly does not steer continuously. It goes nearly straight and
+// changes heading in discrete body saccades, with slow sub-threshold drift in
+// between — Geurten, Jähde, Rosner & Egelhaaf 2014 (Front Behav Neurosci
+// 8:365, 10.3389/fnbeh.2014.00365) scored 1140 saccades against 3348 slow
+// turns in freely walking Canton-S at 500 fps. So the shape here is right;
+// the numbers were not. The code snapped the heading by up to 86 deg in a
+// single step.
+
+// Body-saccade amplitude, rad. Measured mean is ~15 deg; this range averages
+// to it. Sign is drawn separately (Geurten et al. 2014).
+export const SACCADE_MIN = 0.09;   // 5 deg
+export const SACCADE_MAX = 0.44;   // 25 deg
+// Body-saccade duration, s — measured 40-120 ms, median 90 (Geurten et al.
+// 2014). A 15 deg turn spent over it peaks near 170 deg/s, just under the
+// 200 deg/s those authors use as the saccade detection threshold.
+export const SACCADE_DUR = 0.09;
+// Swing (leg-in-air) duration, s. Nearly constant across walking speed — it is
+// stance that scales as 1/v — Mendes, Bartos, Akay, Márka & Mann 2013
+// (eLife 2:e00231, 10.7554/eLife.00231, Table 2). The gait used a fixed 40%
+// swing fraction instead, which stretches the swing at low speed.
+export const SWING_DUR = 0.035;
 
 // NSColor(calibratedRed:green:blue:) values are sRGB components.
 function srgb(r, g, b) { return new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace); }
@@ -258,6 +290,9 @@ export class Fly {
     this.scareCooldown = 0;
     this.dartCooldown = 0;
     this.backwardTimer = 0;
+    // Radians of body saccade not yet spent, and the rate it is spent at.
+    this.saccade = 0;
+    this.saccadeRate = 0;
     this.dartTimer = 0;
     this.stateAge = 0;
     this.terrain = [];      // walkable window edges, set by the coordinator
@@ -380,6 +415,27 @@ export class Fly {
     this.model.blurWingR.visible = false;
   }
 
+  // Queue a body saccade instead of snapping the heading. Escape turns do NOT
+  // go through this: a fleeing fly extends its legs in 3.33 ms (Card &
+  // Dickinson 2008, J Exp Biol 211:341, 10.1242/jeb.012682) and must stay
+  // instant.
+  startSaccade() {
+    this.saccade = (rnd(0, 1) < 0.5 ? -1 : 1) * rnd(SACCADE_MIN, SACCADE_MAX);
+    this.saccadeRate = this.saccade / SACCADE_DUR;
+  }
+
+  stepSaccade(dt) {
+    if (this.saccade === 0) return;
+    const step = this.saccadeRate * dt;
+    if (Math.abs(step) >= Math.abs(this.saccade)) {
+      this.heading += this.saccade;
+      this.saccade = 0;
+    } else {
+      this.heading += step;
+      this.saccade -= step;
+    }
+  }
+
   pickNextState() {
     switch (this.state) {
       case 'walking': {
@@ -387,7 +443,7 @@ export class Fly {
         if (r < 0.30) { this.state = 'idle'; this.stateTimer = rnd(0.8, 3); this.speed = 0; }
         else if (r < 0.55) {
           this.stateTimer = rnd(0.3, 0.8); this.speed = rnd(95, 150);
-          this.heading += rnd(-1.2, 1.2);
+          this.startSaccade();
         } else { this.stateTimer = rnd(1.5, 5); this.speed = rnd(18, 45); }
         break;
       }
@@ -396,7 +452,7 @@ export class Fly {
         if (r < 0.35) { this.state = 'grooming'; this.stateTimer = rnd(1.0, 2.5); }
         else {
           this.state = 'walking'; this.stateTimer = rnd(1.5, 5); this.speed = rnd(18, 45);
-          this.heading += rnd(-1.5, 1.5);
+          this.startSaccade();
         }
         break;
       }
@@ -423,8 +479,10 @@ export class Fly {
     this.liveWing = signals ? signals.wingDrive : 0;
 
     if (this.state === 'flying') {
+      this.saccade = 0;            // airborne heading is geometric, not a walk saccade
       this.updateFlight(dt);
     } else if (signals) {
+      this.stepSaccade(dt);
       this.brainBehavior(signals, dt, bounds, mouse);
       if (this.state === 'walking') this.updateWalk(dt, bounds);
     } else {
@@ -435,6 +493,7 @@ export class Fly {
           this.startFlight(bounds, { awayFrom: mouse });
         } else if (mouseDist < NERVOUS_RADIUS && this.state !== 'walking') {
           this.setState('walking');
+          this.saccade = 0;        // fleeing turns are instant, not saccadic
           this.heading = Math.atan2(this.pos.y - mouse.y, this.pos.x - mouse.x) + rnd(-0.4, 0.4);
           this.speed = rnd(110, 150);
           this.stateTimer = rnd(0.4, 0.9);
@@ -442,6 +501,7 @@ export class Fly {
         }
       }
       if (this.state !== 'flying') {
+        this.stepSaccade(dt);
         this.stateTimer -= dt;
         if (this.stateTimer <= 0) {
           if (this.state === 'walking' && rnd(0, 1) < 0.10) this.startFlight(bounds);
@@ -489,8 +549,9 @@ export class Fly {
       this.ledge = null;
       this.setState('walking');
       if (mouse) {
+        this.saccade = 0;        // fleeing turns are instant, not saccadic
         this.heading = Math.atan2(this.pos.y - mouse.y, this.pos.x - mouse.x) + rnd(-0.4, 0.4);
-      } else { this.heading += rnd(-1.5, 1.5); }
+      } else { this.startSaccade(); }
       this.speed = rnd(110, 155);
       this.dartTimer = rnd(0.4, 0.9);
       this.dartCooldown = 1.2;
@@ -506,7 +567,7 @@ export class Fly {
     // DNp09 (forward-walking command) hysteresis
     if (this.state === 'idle' && s.walkDrive > 0.22 && this.stateAge > 0.4) {
       this.setState('walking');
-      this.heading += rnd(-0.8, 0.8);
+      this.startSaccade();
     } else if (this.state === 'walking' && this.dartTimer === 0
                && s.walkDrive < 0.08 && this.stateAge > 0.5) {
       this.setState('idle');
@@ -521,14 +582,14 @@ export class Fly {
     if (this.state === 'walking') {
       if (this.dartTimer === 0 && this.backwardTimer === 0) {
         const target = (14 + s.walkDrive * 55) * s.tempo;
-        this.speed += (target - this.speed) * Math.min(1, 3 * dt);
+        this.speed += (target - this.speed) * lag(3, dt);
       }
       if (!this.ledge) this.heading += s.turnBias * dt;   // DNa01/DNa02 steering
     }
     // spontaneous takeoff, gated on whole-population arousal; flight
     // altitude/effort scales with how aroused the network is
     const flightChance = s.arousal > 0.5 ? 0.6 : 0.005;
-    if (this.state === 'walking' && rnd(0, 1) < flightChance * dt) {
+    if (this.state === 'walking' && rnd(0, 1) < lag(flightChance, dt)) {
       this.startFlight(bounds, { effort: 0.35 + s.arousal * 0.6 });
     }
   }
@@ -548,21 +609,21 @@ export class Fly {
     if (this.ledge) {
       const L = this.ledge;
       // walk along the window edge
-      this.heading += rnd(-1, 1) * 0.2 * dt;
+      this.heading += rnd(-1, 1) * LEDGE_JITTER * Math.sqrt(dt);
       const along = Math.cos(this.heading) >= 0 ? 0 : Math.PI;
-      this.heading += angleDiff(this.heading, along) * Math.min(1, 6 * dt);
+      this.heading += angleDiff(this.heading, along) * lag(6, dt);
       this.pos.x += Math.cos(this.heading) * this.effectiveSpeed * dt;
-      this.pos.y += (L.y - this.pos.y) * Math.min(1, 10 * dt);
+      this.pos.y += (L.y - this.pos.y) * lag(10, dt);
       if (this.pos.x <= L.x0 + 6 && Math.cos(this.heading) < 0) this.heading = 0;
       if (this.pos.x >= L.x1 - 6 && Math.cos(this.heading) > 0) this.heading = Math.PI;
       this.pos.x = clampf(this.pos.x, L.x0, L.x1);
-      if (rnd(0, 1) < 0.05 * dt) this.ledge = null;   // wander off the edge
+      if (rnd(0, 1) < lag(0.05, dt)) this.ledge = null;   // wander off the edge
     } else {
-      this.heading += rnd(-1, 1) * 1.6 * dt;
+      this.heading += rnd(-1, 1) * WANDER_JITTER * Math.sqrt(dt);
       const hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN;
       if (Math.abs(this.pos.x) > hw || Math.abs(this.pos.y) > hh) {
         const toCenter = Math.atan2(-this.pos.y, -this.pos.x);
-        this.heading += angleDiff(this.heading, toCenter) * Math.min(1, 4 * dt);
+        this.heading += angleDiff(this.heading, toCenter) * lag(4, dt);
       }
       const v = this.effectiveSpeed;
       this.pos.x += Math.cos(this.heading) * v * dt;
@@ -573,12 +634,12 @@ export class Fly {
       if (!this.onScreen(this.pos.x, this.pos.y)) {
         const c = this.nearestScreenCenter(this.pos.x, this.pos.y);
         this.heading += angleDiff(this.heading, Math.atan2(c.y - this.pos.y, c.x - this.pos.x))
-          * Math.min(1, 5 * dt);
+          * lag(5, dt);
       }
       // walked onto a window edge? latch on
       for (const L of this.terrain) {
         if (this.pos.x > L.x0 - 8 && this.pos.x < L.x1 + 8 && Math.abs(this.pos.y - L.y) < 20) {
-          if (rnd(0, 1) < 0.9 * dt) {
+          if (rnd(0, 1) < lag(0.9, dt)) {
             this.ledge = L;
             this.heading = Math.cos(this.heading) >= 0 ? 0 : Math.PI;
             break;
@@ -603,7 +664,7 @@ export class Fly {
       this.pos.x = this.flightTo.x + Math.sin(this.time * 26) * 1.2;
       this.pos.y = this.flightTo.y + Math.cos(this.time * 22) * 1.0;
       this.pitch = clampf(this.alt * 0.4, 0, 0.35);   // gentle nose-up flare
-      this.alt += (0 - this.alt) * Math.min(1, 9 * dt);
+      this.alt += (0 - this.alt) * lag(9, dt);
       this.applyAltitude();
       if (this.alt < 0.035) { this.pos = { x: this.flightTo.x, y: this.flightTo.y }; this.land(); }
       return;
@@ -628,7 +689,7 @@ export class Fly {
     const fallEnv = Math.min((1 - this.flightT) / 0.3, 1);
     const target = this.effortCurrent * Math.min(riseEnv, fallEnv) * (0.85 + 0.15 * Math.sin(this.time * 7));
     this.pitch = clampf((target - this.alt) * 2.5, -0.45, 0.45);   // nose up while climbing
-    this.alt += (target - this.alt) * Math.min(1, 6 * dt);
+    this.alt += (target - this.alt) * lag(6, dt);
     // higher = closer to the viewer = bigger, and the shadow slides away
     this.applyAltitude();
   }
@@ -641,7 +702,9 @@ export class Fly {
       const stride = Math.max(5, 2 * amp * 13);
       const freq = clampf(v / stride, 3, 11);
       this.gaitPhase = (this.gaitPhase + freq * dt) % 1;
-      const stanceFrac = 0.6;
+      // Swing lasts a near-constant ~35 ms whatever the speed; it is stance
+      // that shortens as the fly speeds up. A fixed fraction did the opposite.
+      const stanceFrac = clampf(1 - SWING_DUR * freq, 0.35, 0.9);
       for (const leg of this.model.legs) {
         const p = (this.gaitPhase + leg.phase) % 1;
         if (p < stanceFrac) {
@@ -661,21 +724,21 @@ export class Fly {
           leg.angle = 0.45 + 0.25 * Math.sin(this.time * 20 + leg.swingSign * 1.3);
           leg.lift = 0.55 + 0.15 * Math.sin(this.time * 22);
         } else {
-          leg.angle += (0 - leg.angle) * Math.min(1, 8 * dt);
-          leg.lift += (0 - leg.lift) * Math.min(1, 8 * dt);
+          leg.angle += (0 - leg.angle) * lag(8, dt);
+          leg.lift += (0 - leg.lift) * lag(8, dt);
         }
         leg.apply();
       }
     } else if (this.state === 'flying') {
       for (const leg of this.model.legs) {
-        leg.angle += (-0.35 - leg.angle) * Math.min(1, 6 * dt);
-        leg.lift += (0.5 - leg.lift) * Math.min(1, 6 * dt);
+        leg.angle += (-0.35 - leg.angle) * lag(6, dt);
+        leg.lift += (0.5 - leg.lift) * lag(6, dt);
         leg.apply();
       }
     } else {
       for (const leg of this.model.legs) {
-        leg.angle += (0 - leg.angle) * Math.min(1, 10 * dt);
-        leg.lift += (0 - leg.lift) * Math.min(1, 10 * dt);
+        leg.angle += (0 - leg.angle) * lag(10, dt);
+        leg.lift += (0 - leg.lift) * lag(10, dt);
         leg.apply();
       }
     }
@@ -687,7 +750,7 @@ export class Fly {
       if (this.model.foldedWings.visible) {
         const raiseTarget = (this.state !== 'sleeping'
           && (this.liveWing > 0.7 || (this.brainLive && this.dartTimer > 0))) ? 1 : 0;
-        this.wingRaise += (raiseTarget - this.wingRaise) * Math.min(1, 8 * dt);
+        this.wingRaise += (raiseTarget - this.wingRaise) * lag(8, dt);
         if (this.wingRaise > 0.01) {
           this.model.foldedWings.children.forEach((wing, i) => {
             const side = i === 0 ? -1 : 1;

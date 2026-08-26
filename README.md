@@ -64,6 +64,23 @@ A 🪰 item appears in the menu bar; quit from there. The fly wanders your
 desktop on a transparent, click-through overlay — it never intercepts your
 mouse or keyboard.
 
+### Windows
+
+An Electron + three.js port with the same connectome, the same circuit, and
+the same test suites lives in [`windows/`](windows/) (contributed by
+[@MikeMike88](https://github.com/MikeMike88)). Requires Windows 10/11 and
+[Node.js](https://nodejs.org) 18+:
+
+```sh
+cd desktop-fly/windows
+npm install
+npm start          # tray icon 🪰; quit from there
+npm test           # both suites, headless
+```
+
+See [windows/README.md](windows/README.md) for the macOS→Windows mapping
+table and platform notes (the fly there roams all monitors on its own).
+
 ## Controls (menu bar 🪰)
 
 | item | effect |
@@ -130,7 +147,7 @@ cd - && python3 etl.py /tmp/flywire
 
 ```sh
 ./DesktopFly --simtest        # circuit invariants: GF silent at rest, 4 ms loom latency, ...
-./DesktopFly --behaviortest   # 17 end-to-end checks: stimulate neurons -> body reacts
+./DesktopFly --behaviortest   # 18 end-to-end checks: stimulate neurons -> body reacts
 ./DesktopFly --snapshot f.png  # offscreen fly render
 ./DesktopFly --brainshot b.png # offscreen brain render
 ```

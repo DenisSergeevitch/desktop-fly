@@ -32,7 +32,7 @@ rewritten; everything that computes came over unchanged in behavior.
 npm install
 npm start              # tray icon; quit from there
 npm run simtest        # circuit invariants (MUST pass after sim changes)
-npm run behaviortest   # 17 end-to-end sim -> body checks
+npm run behaviortest   # 18 end-to-end sim -> body checks
 npm test               # both
 ```
 
