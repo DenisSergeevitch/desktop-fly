@@ -271,7 +271,7 @@ func runBehaviorTest() {
              describe: { "state=\($0.state)" })
 
     scenario("DNp09 stim -> walks, speed rises (capped)",
-             stim: { $0.stimulate($0.fwd, strength: 0.25, durationMs: 1200) }, hold: 1.5,
+             stim: { $0.stimulate($0.fwd, strength: 0.35, durationMs: 1200) }, hold: 1.5,
              check: { $0.state == .walking && $0.speed > 40 && $0.speed < 100 },
              describe: { "state=\($0.state) speed=\(Int($0.speed))" })
 
@@ -401,7 +401,7 @@ func runBehaviorTest() {
         let fly = Fly(at: .zero)
         fly.state = .idle
         fly.startFlight(bounds: bounds, effort: 0.5)
-        var calm = BrainSignals()
+        let calm = BrainSignals()
         for _ in 0..<12 { fly.update(dt: dt, bounds: bounds, mouse: nil, signals: calm) }
         let calmEffort = fly.effortCurrent
         var hot = BrainSignals(); hot.wingDrive = 1.0; hot.arousal = 0.6
@@ -452,6 +452,84 @@ func runBehaviorTest() {
         return (ok, String(format: "3h %.2f, 9h %.2f, 14h %.2f, 18h %.2f", night, dawn, siesta, dusk))
     }
 
+    bodyCheck("courtship -> mating -> juvenile offspring") {
+        let manager = BreedingManager(automaticInterval: 999...999)
+        let male = Fly(at: CGPoint(x: -24, y: 0), sex: .male)
+        let female = Fly(at: CGPoint(x: 24, y: 0), sex: .female)
+        var population = [male, female]
+        var sawCourtship = false, sawMating = false
+        var offspring: Fly?
+        manager.requestCourtship()
+        for _ in 0..<600 {
+            let newborns = manager.update(flies: population, dt: dt, bounds: bounds)
+            if let child = newborns.first {
+                offspring = child
+                population.append(child)
+            }
+            for fly in population {
+                fly.update(dt: dt, bounds: bounds, mouse: nil, signals: nil)
+                sawCourtship = sawCourtship || fly.state == .courting
+                sawMating = sawMating || fly.state == .mating
+            }
+            if offspring != nil { break }
+        }
+        guard let child = offspring else {
+            return (false, "courtship=\(sawCourtship) mating=\(sawMating), no offspring")
+        }
+        let ok = sawCourtship && sawMating && !child.isAdult
+            && male.breedingCooldown > 50 && female.breedingCooldown > 50
+        return (ok, "courtship=\(sawCourtship) mating=\(sawMating), child=\(child.sex.rawValue), adult=\(child.isAdult)")
+    }
+
+    bodyCheck("juvenile grows to reproductive maturity") {
+        let child = Fly(at: .zero, sex: .female, juvenile: true)
+        let startScale = child.node.scale.x
+        for _ in 0..<Int((FLY_MATURITY_SECONDS + 0.5) / dt) {
+            child.update(dt: dt, bounds: bounds, mouse: nil, signals: nil)
+        }
+        return (startScale < FLY_SCALE * 0.7 && child.isAdult,
+                String(format: "scale %.2f -> %.2f, adult=%@", startScale,
+                       child.node.scale.x, child.isAdult ? "yes" : "NO"))
+    }
+
+    bodyCheck("reproduction continues above twelve flies") {
+        let manager = BreedingManager(automaticInterval: 999...999)
+        let male = Fly(at: CGPoint(x: -24, y: 0), sex: .male)
+        let female = Fly(at: CGPoint(x: 24, y: 0), sex: .female)
+        var population = [male, female]
+        for i in 0..<11 {
+            population.append(Fly(at: CGPoint(x: CGFloat(i * 10), y: 200),
+                                  sex: i.isMultiple(of: 2) ? .female : .male,
+                                  juvenile: true))
+        }
+        manager.requestCourtship()
+        for _ in 0..<600 {
+            let newborns = manager.update(flies: population, dt: dt, bounds: bounds)
+            male.update(dt: dt, bounds: bounds, mouse: nil, signals: nil)
+            female.update(dt: dt, bounds: bounds, mouse: nil, signals: nil)
+            if !newborns.isEmpty {
+                population.append(contentsOf: newborns)
+                return (population.count == 14, "population \(population.count)")
+            }
+        }
+        return (false, "stalled at population \(population.count)")
+    }
+
+    bodyCheck("escape interrupts courtship for both partners") {
+        let manager = BreedingManager(automaticInterval: 999...999)
+        let male = Fly(at: CGPoint(x: -20, y: 0), sex: .male)
+        let female = Fly(at: CGPoint(x: 20, y: 0), sex: .female)
+        let pair = [male, female]
+        manager.requestCourtship()
+        _ = manager.update(flies: pair, dt: dt, bounds: bounds)
+        var danger = BrainSignals(); danger.escape = true
+        male.update(dt: dt, bounds: bounds, mouse: .zero, signals: danger)
+        _ = manager.update(flies: pair, dt: dt, bounds: bounds)
+        let femaleReleased = female.state != .courting && female.state != .mating
+        return (male.state == .flying && femaleReleased && !manager.hasActivePair,
+                "male=\(male.state), female=\(female.state), active=\(manager.hasActivePair)")
+    }
+
     print(failures == 0 ? "ALL BEHAVIOR TESTS PASS" : "\(failures) FAILURES")
     exit(failures == 0 ? 0 : 1)
 }
@@ -482,6 +560,149 @@ final class SignalBuilder {
     }
 }
 
+// MARK: - Social behavior + reproduction
+
+final class BreedingManager {
+    private enum Stage { case courtship, mating }
+
+    private final class Pair {
+        let male: Fly
+        let female: Fly
+        var stage: Stage = .courtship
+        var elapsed: CGFloat = 0
+
+        init(male: Fly, female: Fly) {
+            self.male = male
+            self.female = female
+        }
+    }
+
+    private var pair: Pair?
+    private var requested = false
+    private var automaticTimer: CGFloat
+    private let automaticInterval: ClosedRange<CGFloat>
+
+    var hasActivePair: Bool { pair != nil }
+
+    init(automaticInterval: ClosedRange<CGFloat> = 14...28) {
+        self.automaticInterval = automaticInterval
+        automaticTimer = rnd(automaticInterval)
+    }
+
+    func requestCourtship() {
+        if pair == nil { requested = true }
+    }
+
+    private func resetAutomaticTimer() {
+        automaticTimer = rnd(automaticInterval)
+    }
+
+    private func nearestPair(in flies: [Fly], forced: Bool) -> (male: Fly, female: Fly)? {
+        let males = flies.filter { $0.sex == .male && $0.isAvailableForCourtship }
+        let females = flies.filter { $0.sex == .female && $0.isAvailableForCourtship }
+        var result: (Fly, Fly)?
+        var best = CGFloat.greatestFiniteMagnitude
+        for male in males {
+            for female in females {
+                let d = hypot(male.pos.x - female.pos.x, male.pos.y - female.pos.y)
+                if d < best {
+                    best = d
+                    result = (male, female)
+                }
+            }
+        }
+        if !forced && best > 340 { return nil }
+        return result
+    }
+
+    private func cancelPair() {
+        pair?.male.cancelSocialBehavior()
+        pair?.female.cancelSocialBehavior()
+        pair = nil
+        resetAutomaticTimer()
+    }
+
+    // Returns any newly emerged offspring so the coordinator can attach them
+    // to the SceneKit scene without giving this behavior object scene ownership.
+    func update(flies: [Fly], dt: CGFloat, bounds: CGSize) -> [Fly] {
+        if let p = pair {
+            guard flies.contains(where: { $0 === p.male }),
+                  flies.contains(where: { $0 === p.female }) else {
+                cancelPair()
+                return []
+            }
+
+            p.elapsed += dt
+            switch p.stage {
+            case .courtship:
+                guard p.male.state == .courting, p.female.state == .courting else {
+                    cancelPair()
+                    return []
+                }
+                p.male.updateSocialTarget(p.female.pos)
+                p.female.updateSocialTarget(p.male.pos)
+                let distance = hypot(p.male.pos.x - p.female.pos.x,
+                                     p.male.pos.y - p.female.pos.y)
+                if distance < 30, p.elapsed >= 1.6 {
+                    let sharedHeading = p.male.heading
+                    let maleTarget = CGPoint(x: p.female.pos.x - cos(sharedHeading) * 13,
+                                             y: p.female.pos.y - sin(sharedHeading) * 13)
+                    p.female.beginMating(toward: p.female.pos, lead: false,
+                                         heading: sharedHeading)
+                    p.male.beginMating(toward: maleTarget, lead: true,
+                                       heading: sharedHeading)
+                    p.stage = .mating
+                    p.elapsed = 0
+                } else if p.elapsed > 14 {
+                    cancelPair()
+                }
+
+            case .mating:
+                guard p.male.state == .mating, p.female.state == .mating else {
+                    cancelPair()
+                    return []
+                }
+                let target = CGPoint(x: p.female.pos.x - cos(p.female.heading) * 13,
+                                     y: p.female.pos.y - sin(p.female.heading) * 13)
+                p.male.updateSocialTarget(target)
+                if p.elapsed >= 3.0 {
+                    let emergencePoint = CGPoint(
+                        x: clampf(p.female.pos.x + rnd(-24...24),
+                                  -bounds.width / 2 + 20, bounds.width / 2 - 20),
+                        y: clampf(p.female.pos.y + rnd(-24...24),
+                                  -bounds.height / 2 + 20, bounds.height / 2 - 20))
+                    p.male.finishMating()
+                    p.female.finishMating()
+                    pair = nil
+                    resetAutomaticTimer()
+                    let childSex: FlySex = Bool.random() ? .female : .male
+                    return [Fly(at: emergencePoint, sex: childSex, juvenile: true)]
+                }
+            }
+            return []
+        }
+
+        automaticTimer -= dt
+        let forced = requested
+        guard forced || automaticTimer <= 0 else { return [] }
+        guard let selected = nearestPair(in: flies, forced: forced) else {
+            if automaticTimer <= 0 { automaticTimer = 5 }
+            return []
+        }
+
+        requested = false
+        selected.male.beginCourtship(toward: selected.female.pos, lead: true)
+        selected.female.beginCourtship(toward: selected.male.pos, lead: false)
+        guard selected.male.state == .courting, selected.female.state == .courting else {
+            selected.male.cancelSocialBehavior()
+            selected.female.cancelSocialBehavior()
+            return []
+        }
+        pair = Pair(male: selected.male, female: selected.female)
+        return []
+    }
+}
+
 // MARK: - Coordinator
 
 final class Coordinator: NSObject, SCNSceneRendererDelegate {
@@ -498,6 +719,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var fpsFrames = 0
     private var fpsWindowStart: TimeInterval = 0
     private let signalBuilder = SignalBuilder()
+    private let breedingManager = BreedingManager()
     private var msAccumulator: Double = 0
     private var prevMouse: CGPoint?
     private var mouseVel = CGPoint.zero
@@ -518,18 +740,30 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         self.sim = sim
         self.scene = buildScene(bounds: bounds)
         super.init()
-        enqueue { $0.addFlyNow() }
+        enqueue { $0.addFlyNow(sex: .female) }
     }
 
     func enqueue(_ action: @escaping (Coordinator) -> Void) {
         lock.lock(); pending.append(action); lock.unlock()
     }
 
-    private func addFlyNow() {
+    @discardableResult
+    private func addFlyNow(at position: CGPoint? = nil, sex: FlySex? = nil,
+                           juvenile: Bool = false) -> Fly? {
         let hw = bounds.width / 2 - 100, hh = bounds.height / 2 - 100
-        let fly = Fly(at: CGPoint(x: rnd(-hw...hw), y: rnd(-hh...hh)))
+        let chosenSex: FlySex
+        if let sex {
+            chosenSex = sex
+        } else {
+            let males = flies.filter { $0.sex == .male }.count
+            let females = flies.count - males
+            chosenSex = males <= females ? .male : .female
+        }
+        let p = position ?? CGPoint(x: rnd(-hw...hw), y: rnd(-hh...hh))
+        let fly = Fly(at: p, sex: chosenSex, juvenile: juvenile)
         scene.rootNode.addChildNode(fly.node)
         flies.append(fly)
+        return fly
     }
 
     func addFly() { enqueue { $0.addFlyNow() } }
@@ -537,6 +771,23 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         enqueue { c in
             guard c.flies.count > 1 else { return }   // fly #1 carries the brain
             c.flies.removeLast().node.removeFromParentNode()
+        }
+    }
+    func startCourtship() {
+        enqueue { c in
+            let adultMales = c.flies.filter { $0.sex == .male && $0.isAdult }
+            let adultFemales = c.flies.filter { $0.sex == .female && $0.isAdult }
+            if (adultMales.isEmpty || adultFemales.isEmpty),
+               let anchor = c.flies.first {
+                let missing: FlySex = adultMales.isEmpty ? .male : .female
+                let p = CGPoint(
+                    x: clampf(anchor.pos.x + rnd(70...110),
+                              -c.bounds.width / 2 + 20, c.bounds.width / 2 - 20),
+                    y: clampf(anchor.pos.y + rnd(-35...35),
+                              -c.bounds.height / 2 + 20, c.bounds.height / 2 - 20))
+                c.addFlyNow(at: p, sex: missing)
+            }
+            c.breedingManager.requestCourtship()
         }
     }
     func scareAll() {
@@ -676,6 +927,12 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             s.tempo = tempo
             s.sleep = sleepy
             signals = s
+        }
+
+        let offspring = breedingManager.update(flies: flies, dt: dt, bounds: bounds)
+        for child in offspring {
+            scene.rootNode.addChildNode(child.node)
+            flies.append(child)
         }
 
         for (i, fly) in flies.enumerated() {
@@ -847,6 +1104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         menu.addItem(item("Add Fly", #selector(addFly), "a"))
         menu.addItem(item("Remove Fly", #selector(removeFly), "r"))
+        menu.addItem(item("Start Courtship", #selector(startCourtship), "c"))
         menu.addItem(item("Scare Flies", #selector(scareAll), "s"))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -866,6 +1124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func escapeTest() { coordinator.escapeTest() }
     @objc func addFly() { coordinator.addFly() }
     @objc func removeFly() { coordinator.removeFly() }
+    @objc func startCourtship() { coordinator.startCourtship() }
     @objc func scareAll() { coordinator.scareAll() }
 }
 

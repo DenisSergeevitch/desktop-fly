@@ -8,7 +8,8 @@
 A 3D fruit fly that lives on your macOS desktop — driven by a live spiking
 simulation of the real <a href="https://codex.flywire.ai">FlyWire</a>
 connectome. It walks across your windows, grooms, sleeps, and decides to flee
-your cursor with the same neurons a real fly uses.
+your cursor with the same neurons a real fly uses. Add a companion and the
+flies can court, mate, and grow a small desktop population.
 </p>
 
 <p align="center">
@@ -72,7 +73,8 @@ mouse or keyboard.
 | Show/Hide Brain | toggle the live brain window |
 | Escape Test (loom) | inject a looming stimulus, watch the GF fire |
 | Move to Next Display | hop the fly across monitors (shown when >1 display) |
-| Add / Remove Fly | extra flies (only fly #1 carries the brain) |
+| Add / Remove Fly | extra flies with no hard limit (only fly #1 carries the brain) |
+| Start Courtship | pair an available male and female; adds a companion if needed |
 | Scare Flies | startle everyone |
 
 **The brain window is interactive**: hovering pauses the rotation; clicking a
@@ -112,6 +114,14 @@ motion stimulates its sensory (wind) partners.
   quiescence. **Sleep**: idle at night → it sleeps, breathing slowly, with
   raised arousal threshold; it grooms after waking.
 - **Temperature**: flies are ectotherms — a hot Mac is a faster fly.
+- **Courtship and reproduction**: nearby adult males and females may pair on
+  their own, or you can choose **Start Courtship**. The male approaches with a
+  one-wing display, the pair mates, then one small offspring appears and grows
+  to adult size over 20 seconds. Threats interrupt the interaction, parents
+  rest for 60 seconds before pairing again. There is no hard population cap;
+  flies keep reproducing while compatible adults and machine resources allow.
+  Sex dimorphism, timing, and accelerated growth are procedural toy-model
+  choices, not outputs of the FlyWire connectome.
 
 ## Regenerating the data
 
@@ -130,7 +140,7 @@ cd - && python3 etl.py /tmp/flywire
 
 ```sh
 ./DesktopFly --simtest        # circuit invariants: GF silent at rest, 4 ms loom latency, ...
-./DesktopFly --behaviortest   # 17 end-to-end checks: stimulate neurons -> body reacts
+./DesktopFly --behaviortest   # 21 end-to-end checks: brain, body, ecology, reproduction
 ./DesktopFly --snapshot f.png  # offscreen fly render
 ./DesktopFly --brainshot b.png # offscreen brain render
 ```

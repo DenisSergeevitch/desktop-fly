@@ -9,8 +9,8 @@ SceneKit; the brain data is real.
 
 | file | contents |
 |---|---|
-| `main.swift` | overlay scene, CLI modes, `SignalBuilder` (rates→commands), `Coordinator` (render-loop hub), `AppDelegate` (menu, timers, display switching) |
-| `FlyModel.swift` | procedural fly body + `Fly` behavior (states, gait, flight, ledges, sleep) |
+| `main.swift` | overlay scene, CLI modes, `SignalBuilder` (rates→commands), `BreedingManager`, `Coordinator` (render-loop hub), `AppDelegate` (menu, timers, display switching) |
+| `FlyModel.swift` | procedural fly body + `Fly` behavior (states, gait, flight, ledges, sleep, courtship/mating) |
 | `Sim.swift` | data loading, `BrainSignals`, `SpikeBus`, `LIFSim` (CSR network, stimulation API) |
 | `BrainView.swift` | brain window: point clouds, click-to-stimulate, spike flashes |
 | `Environment.swift` | permission-free senses: `WindowSense` (ledges/looms), circadian curve, user idle, thermal tempo |
@@ -23,7 +23,7 @@ SceneKit; the brain data is real.
 ./build.sh                     # bare swiftc, -swift-version 5, no Xcode project
 ./DesktopFly                   # menu-bar 🪰; quit from there
 ./DesktopFly --simtest         # circuit invariants (MUST pass after sim/etl changes)
-./DesktopFly --behaviortest    # 17 end-to-end sim→body checks (MUST pass after behavior changes)
+./DesktopFly --behaviortest    # 21 end-to-end sim→body/ecology checks (MUST pass after behavior changes)
 ./DesktopFly --snapshot f.png  # offscreen fly render
 ./DesktopFly --brainshot b.png # offscreen brain render
 ```
@@ -64,6 +64,19 @@ trust the compiler, not single-file diagnostics.
 Whole-population rate → `BrainSignals.arousal` (spontaneous-takeoff gate,
 flight effort). Only fly #1 has the brain; extra flies use legacy
 distance-based behavior (`signals: nil` path).
+
+## Courtship and reproduction
+
+- `BreedingManager` owns pair selection and the courtship → mating → offspring
+  sequence; `Fly` owns the movement and body poses for its social states.
+- Adult male/female pairs can form automatically within 340 points. The menu's
+  **Start Courtship** action forces the nearest eligible pair and creates a
+  missing-sex companion when the desktop has only one compatible adult.
+- Escape, nervous input, sleep, and nearby cursor threats interrupt social
+  behavior. Parents receive a 60 s cooldown and offspring mature visually over
+  20 s. There is intentionally no hard population cap.
+- These reproductive timings and sex/body cues are modeled UI behavior, not
+  claims derived from FlyWire physiology.
 
 ## Adding a new neuron population (recipe)
 

@@ -10,6 +10,12 @@ let FLY_SCALE: CGFloat = 1.15
 let EDGE_MARGIN: CGFloat = 50
 let SCARE_RADIUS: CGFloat = 110        // legacy behavior (non-connectome flies) only
 let NERVOUS_RADIUS: CGFloat = 240      // legacy behavior only
+let FLY_MATURITY_SECONDS: CGFloat = 20
+
+enum FlySex: String {
+    case female
+    case male
+}
 
 func rnd(_ range: ClosedRange<CGFloat>) -> CGFloat { CGFloat.random(in: range) }
 func clampf(_ v: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat { min(hi, max(lo, v)) }
@@ -40,12 +46,16 @@ func savePNG(_ image: NSImage, to path: String) {
     catch { fputs("snapshot: \(error)\n", stderr); exit(1) }
 }
 
-func abdomenTexture() -> NSImage {
+func abdomenTexture(sex: FlySex = .female) -> NSImage {
     let size = NSSize(width: 64, height: 128)
     let img = NSImage(size: size)
     img.lockFocus()
-    let base = NSColor(calibratedRed: 0.72, green: 0.55, blue: 0.32, alpha: 1)
-    let dark = NSColor(calibratedRed: 0.22, green: 0.15, blue: 0.09, alpha: 1)
+    let base = sex == .male
+        ? NSColor(calibratedRed: 0.56, green: 0.40, blue: 0.22, alpha: 1)
+        : NSColor(calibratedRed: 0.72, green: 0.55, blue: 0.32, alpha: 1)
+    let dark = sex == .male
+        ? NSColor(calibratedRed: 0.13, green: 0.09, blue: 0.06, alpha: 1)
+        : NSColor(calibratedRed: 0.22, green: 0.15, blue: 0.09, alpha: 1)
     base.setFill()
     NSRect(origin: .zero, size: size).fill()
     dark.setFill()
@@ -141,7 +151,7 @@ func wingShape() -> SCNGeometry {
     return shape
 }
 
-func buildFlyModel() -> FlyModel {
+func buildFlyModel(sex: FlySex = .female) -> FlyModel {
     let root = SCNNode()
     root.scale = SCNVector3(FLY_SCALE, FLY_SCALE, FLY_SCALE)
 
@@ -157,13 +167,14 @@ func buildFlyModel() -> FlyModel {
     let abdGeo = SCNSphere(radius: 5.0)
     let abdMat = SCNMaterial()
     abdMat.lightingModel = .blinn
-    abdMat.diffuse.contents = abdomenTexture()
+    abdMat.diffuse.contents = abdomenTexture(sex: sex)
     abdMat.specular.contents = NSColor(white: 0.3, alpha: 1)
     abdMat.shininess = 0.35
     abdGeo.materials = [abdMat]
     let abdomen = SCNNode(geometry: abdGeo)
     abdomen.position = SCNVector3(0, -6.5, 5.6)
-    abdomen.scale = SCNVector3(0.9, 1.5, 0.75)
+    abdomen.scale = sex == .female ? SCNVector3(0.9, 1.55, 0.75)
+                                    : SCNVector3(0.9, 1.38, 0.78)
     root.addChildNode(abdomen)
 
     let headGeo = SCNSphere(radius: 3.0)
@@ -251,10 +262,11 @@ func buildFlyModel() -> FlyModel {
 // MARK: - Behavior
 
 final class Fly {
-    enum State { case walking, idle, grooming, flying, sleeping }
+    enum State { case walking, idle, grooming, flying, sleeping, courting, mating }
 
     let model: FlyModel
     var node: SCNNode { model.root }
+    let sex: FlySex
 
     var pos: CGPoint
     var heading: CGFloat = rnd(0...(2 * .pi))
@@ -270,6 +282,20 @@ final class Fly {
     var stateAge: CGFloat = 0
     var terrain: [Ledge] = []      // walkable window edges, set by the coordinator
     var ledge: Ledge?              // currently attached window edge
+    var age: CGFloat
+    var breedingCooldown: CGFloat = 0
+    private(set) var socialTarget: CGPoint?
+    private(set) var socialLead = false
+
+    var isAdult: Bool { age >= FLY_MATURITY_SECONDS }
+    var isAvailableForCourtship: Bool {
+        isAdult && breedingCooldown <= 0
+            && (state == .walking || state == .idle || state == .grooming)
+    }
+    private var maturityScale: CGFloat {
+        0.55 + 0.45 * smoothstep(age / FLY_MATURITY_SECONDS)
+    }
+    private var groundedScale: CGFloat { FLY_SCALE * maturityScale }
 
     var gaitPhasePublic: CGFloat { gaitPhase }
     var walkingIntensity: CGFloat {
@@ -290,8 +316,10 @@ final class Fly {
     private var liveArousal: CGFloat = 0
     private var liveWing: CGFloat = 0
 
-    init(at p: CGPoint) {
-        model = buildFlyModel()
+    init(at p: CGPoint, sex: FlySex = .female, juvenile: Bool = false) {
+        self.sex = sex
+        self.age = juvenile ? 0 : FLY_MATURITY_SECONDS
+        model = buildFlyModel(sex: sex)
         pos = p
         syncNode()
     }
@@ -299,11 +327,59 @@ final class Fly {
     func syncNode() {
         node.position = SCNVector3(pos.x, pos.y, node.position.z)
         node.eulerAngles = SCNVector3(pitch, 0, heading - .pi / 2)
+        if state != .flying {
+            let s = groundedScale
+            node.scale = SCNVector3(s, s, s)
+        }
+    }
+
+    func beginCourtship(toward target: CGPoint, lead: Bool) {
+        guard isAvailableForCourtship else { return }
+        state = .courting
+        stateAge = 0
+        ledge = nil
+        socialTarget = target
+        socialLead = lead
+        speed = lead ? 70 : 0
+    }
+
+    func updateSocialTarget(_ target: CGPoint) { socialTarget = target }
+
+    func beginMating(toward target: CGPoint, lead: Bool, heading sharedHeading: CGFloat) {
+        state = .mating
+        stateAge = 0
+        socialTarget = target
+        socialLead = lead
+        heading = sharedHeading
+        speed = 0
+    }
+
+    func finishMating(cooldown: CGFloat = 60) {
+        breedingCooldown = max(breedingCooldown, cooldown)
+        socialTarget = nil
+        socialLead = false
+        if state == .mating || state == .courting {
+            setState(.idle)
+            stateTimer = rnd(0.8...1.8)
+            speed = 0
+        }
+    }
+
+    func cancelSocialBehavior() {
+        socialTarget = nil
+        socialLead = false
+        if state == .mating || state == .courting {
+            setState(.idle)
+            stateTimer = rnd(0.4...1.0)
+            speed = 0
+        }
     }
 
     func startFlight(bounds: CGSize, awayFrom: CGPoint? = nil, escape: Bool = false,
                      effort: CGFloat? = nil) {
         state = .flying
+        socialTarget = nil
+        socialLead = false
         ledge = nil
         flightEffort = clampf(effort ?? (escape ? 1.0 : rnd(0.4...0.75)), 0.25, 1)
         effortCurrent = flightEffort
@@ -351,7 +427,8 @@ final class Fly {
         speed = 0
         alt = 0
         pitch = 0
-        node.scale = SCNVector3(FLY_SCALE, FLY_SCALE, FLY_SCALE)
+        let s = groundedScale
+        node.scale = SCNVector3(s, s, s)
         var p = node.position; p.z = 0; node.position = p
         // refold the wings flat over the abdomen
         for (i, wing) in model.foldedWings.childNodes.enumerated() {
@@ -378,13 +455,15 @@ final class Fly {
                    heading += rnd(-1.5...1.5) }
         case .grooming:
             state = .idle; stateTimer = rnd(0.3...1.0)
-        case .flying, .sleeping:
+        case .flying, .sleeping, .courting, .mating:
             break
         }
     }
 
     func update(dt: CGFloat, bounds: CGSize, mouse: CGPoint?, signals: BrainSignals?) {
         time += dt
+        age += dt
+        breedingCooldown = max(0, breedingCooldown - dt)
         scareCooldown = max(0, scareCooldown - dt)
         dartCooldown = max(0, dartCooldown - dt)
         backwardTimer = max(0, backwardTimer - dt)
@@ -399,6 +478,23 @@ final class Fly {
 
         if state == .flying {
             updateFlight(dt: dt)
+        } else if state == .courting || state == .mating {
+            // Threats always override social behavior. The manager notices the
+            // interrupted pair on the next frame and releases the partner.
+            if let s = signals, s.escape, scareCooldown == 0 {
+                startFlight(bounds: bounds, awayFrom: mouse, escape: true)
+            } else if let s = signals, s.sleep {
+                cancelSocialBehavior()
+                setState(.sleeping)
+            } else if let s = signals, s.nervous > 0.40 {
+                cancelSocialBehavior()
+                brainBehavior(s, dt: dt, bounds: bounds, mouse: mouse)
+            } else if signals == nil, scareCooldown == 0, let m = mouse,
+                      hypot(m.x - pos.x, m.y - pos.y) < SCARE_RADIUS {
+                startFlight(bounds: bounds, awayFrom: m, escape: true)
+            } else {
+                updateSocialBehavior(dt: dt, bounds: bounds)
+            }
         } else if let s = signals {
             brainBehavior(s, dt: dt, bounds: bounds, mouse: mouse)
             if state == .walking { updateWalk(dt: dt, bounds: bounds) }
@@ -431,8 +527,37 @@ final class Fly {
         // slower, deeper breathing while asleep
         let breathe = state == .sleeping ? (1 + 0.05 * sin(time * 1.1))
                                          : (1 + 0.03 * sin(time * 3.0))
-        model.abdomen.scale = SCNVector3(0.9, 1.5, 0.75 * breathe)
+        let abdomenY: CGFloat = sex == .female ? 1.55 : 1.38
+        let abdomenZ: CGFloat = sex == .female ? 0.75 : 0.78
+        model.abdomen.scale = SCNVector3(0.9, abdomenY, abdomenZ * breathe)
         syncNode()
+    }
+
+    private func updateSocialBehavior(dt: CGFloat, bounds: CGSize) {
+        guard let target = socialTarget else { cancelSocialBehavior(); return }
+        let dx = target.x - pos.x, dy = target.y - pos.y
+        let dist = hypot(dx, dy)
+        if state == .courting {
+            let face = atan2(dy, dx)
+            heading += angleDiff(heading, face) * min(1, (socialLead ? 7 : 4) * dt)
+            if socialLead {
+                speed = dist > 90 ? 125 : max(24, dist * 1.4)
+                let orbit = sin(time * 8) * min(0.5, dist / 100)
+                heading += orbit * dt * 2
+                pos.x += cos(heading) * speed * dt
+                pos.y += sin(heading) * speed * dt
+            } else {
+                speed = 0
+            }
+        } else if state == .mating {
+            speed = 0
+            if socialLead {
+                pos.x += dx * min(1, 7 * dt)
+                pos.y += dy * min(1, 7 * dt)
+            }
+        }
+        pos.x = clampf(pos.x, -bounds.width / 2 + 20, bounds.width / 2 - 20)
+        pos.y = clampf(pos.y, -bounds.height / 2 + 20, bounds.height / 2 - 20)
     }
 
     private func setState(_ s: State) {
@@ -555,7 +680,7 @@ final class Fly {
     }
 
     private func applyAltitude() {
-        let s = FLY_SCALE * (1 + 0.8 * alt)
+        let s = groundedScale * (1 + 0.8 * alt)
         node.scale = SCNVector3(s, s, s)
         var p = node.position
         p.z = 90 * alt
@@ -601,7 +726,7 @@ final class Fly {
 
     private func updateLegs(dt: CGFloat) {
         let v = abs(effectiveSpeed)
-        let walking = (state == .walking && v > 1)
+        let walking = ((state == .walking || (state == .courting && socialLead)) && v > 1)
         if walking {
             let amp = clampf(0.20 + v * 0.0022, 0.20, 0.50)
             let stride = max(5, 2 * amp * 13)
@@ -649,17 +774,32 @@ final class Fly {
 
     private func updateWings(dt: CGFloat) {
         guard state == .flying else {
+            if state == .courting {
+                // Male Drosophila court with a unilateral wing display.
+                for (i, wing) in model.foldedWings.childNodes.enumerated() {
+                    let side: CGFloat = i == 0 ? -1 : 1
+                    let display = sex == .male && i == 0 ? (0.55 + 0.18 * sin(time * 28)) : 0
+                    wing.eulerAngles = SCNVector3(-0.18 * display, 0,
+                                                  side * (0.13 + display))
+                }
+                return
+            }
+            if state == .mating {
+                for (i, wing) in model.foldedWings.childNodes.enumerated() {
+                    let side: CGFloat = i == 0 ? -1 : 1
+                    wing.eulerAngles = SCNVector3(-0.08 * sin(time * 12), 0, side * 0.18)
+                }
+                return
+            }
             // grounded threat posture: escape-DN / loom activity raises the wings
             if !model.foldedWings.isHidden {
                 let raiseTarget: CGFloat = (state != .sleeping
                     && (liveWing > 0.7 || (brainLive && dartTimer > 0))) ? 1 : 0
                 wingRaise += (raiseTarget - wingRaise) * min(1, 8 * dt)
-                if wingRaise > 0.01 {
-                    for (i, wing) in model.foldedWings.childNodes.enumerated() {
-                        let side: CGFloat = i == 0 ? -1 : 1
-                        wing.eulerAngles = SCNVector3(-0.5 * wingRaise, 0,
-                                                      side * (0.13 + 0.3 * wingRaise))
-                    }
+                for (i, wing) in model.foldedWings.childNodes.enumerated() {
+                    let side: CGFloat = i == 0 ? -1 : 1
+                    wing.eulerAngles = SCNVector3(-0.5 * wingRaise, 0,
+                                                  side * (0.13 + 0.3 * wingRaise))
                 }
             }
             return
