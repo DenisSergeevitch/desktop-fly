@@ -10,7 +10,8 @@ SceneKit; the brain data is real.
 | file | contents |
 |---|---|
 | `main.swift` | overlay scene, CLI modes, `SignalBuilder` (rates→commands), `Coordinator` (render-loop hub), `AppDelegate` (menu, timers, display switching) |
-| `FlyModel.swift` | procedural fly body + `Fly` behavior (states, gait, flight, ledges, sleep) |
+| `FlyModel.swift` | `BodyForm` switch, procedural fly body + `Fly` behavior (states, gait, flight, ledges, sleep) |
+| `BeetleModel.swift` | procedural stag-beetle body — alternate skin for the same `FlyModel` contract |
 | `Sim.swift` | data loading, `BrainSignals`, `SpikeBus`, `LIFSim` (CSR network, stimulation API) |
 | `BrainView.swift` | brain window: point clouds, click-to-stimulate, spike flashes |
 | `Environment.swift` | permission-free senses: `WindowSense` (ledges/looms), circadian curve, user idle, thermal tempo |
@@ -23,19 +24,43 @@ SceneKit; the brain data is real.
 ./build.sh                     # bare swiftc, -swift-version 5, no Xcode project
 ./DesktopFly                   # menu-bar 🪰; quit from there
 ./DesktopFly --simtest         # circuit invariants (MUST pass after sim/etl changes)
-./DesktopFly --behaviortest    # 18 end-to-end sim→body checks (MUST pass after behavior changes)
-./DesktopFly --snapshot f.png  # offscreen fly render
+./DesktopFly --behaviortest    # 23 end-to-end sim→body checks (MUST pass after behavior changes)
+./DesktopFly --snapshot f.png  # offscreen body render (3/4 perspective)
+./DesktopFly --snapshot f.png --top [--flying] [--beetle]  # the app's own top-down
+                               # orthographic view — the only one users see
 ./DesktopFly --brainshot b.png # offscreen brain render
 ```
 
 Always run **both** suites after any change; they are the ground truth.
+Note they are **stochastic** — on unmodified HEAD roughly 16 runs in 100 show a
+failure (`ledge attach` ~10%, `DNp09 stim` ~6%; both are random-walk / sim-noise
+margins). Judge a change by comparing failure *rates* over ~100 runs, not by a
+single red run.
 Key invariants: GF silent over 4 s of rest, GF fires ≤ ~10 ms after abrupt
 loom, walk-drive duty 20–50%, siesta (scale 0.84) walk-drive > 3%,
 no per-frame scale/z snap at landing.
 
 **SourceKit note**: the IDE reports "Cannot find type ..." across files —
-false positives. The five .swift files compile as one module via build.sh;
+false positives. The six .swift files compile as one module via build.sh;
 trust the compiler, not single-file diagnostics.
+
+## Body forms
+
+The behavior layer talks to the body through **one contract**, the `FlyModel`
+struct: `root`, `legs[6]`, `foldedWings` (exactly 2 children — the surfaces that
+beat), `blurWingL/R`, `abdomen`, and optional `elytraL/R`. Nothing in `Fly`
+branches on which form is built; `BODY_FORM` (default `.fly`) + `buildBody()` pick the geometry
+and `Fly.swapBody()` rebuilds it in place, keeping every behavior variable.
+
+- Add a form → new `build<X>Model() -> FlyModel`, a `BodyForm` case, a
+  `buildBody()` arm. Satisfy the contract and no behavior code changes.
+- `updateElytra` is display-only: it reads `state == .flying` and the existing
+  `wingRaise`, adds no signal and makes no decision. The elytra hold a steady
+  open angle — they must NOT be driven by `flapPhase`.
+- The beetle's hindwing outline is pre-rotated by `-side*0.13` to cancel the
+  fixed fold `land()` applies, so folded wings stay tucked under the shell.
+- `--behaviortest` runs the whole grounded suite under the default form and
+  re-runs the gait/wingbeat checks under **both**.
 
 ## Threading model
 

@@ -44,6 +44,21 @@ let SACCADE_DUR: CGFloat = 0.09
 /// swing fraction instead, which stretches the swing at low speed.
 let SWING_DUR: CGFloat = 0.035
 
+/// Which body geometry to build. Purely cosmetic — every form must satisfy the
+/// same `FlyModel` contract, so the behavior layer never branches on it.
+enum BodyForm: String {
+    case fly = "fruit fly"
+    case beetle = "stag beetle"
+}
+var BODY_FORM: BodyForm = .fly
+
+func buildBody() -> FlyModel {
+    switch BODY_FORM {
+    case .fly:    return buildFlyModel()
+    case .beetle: return buildBeetleModel()
+    }
+}
+
 func rnd(_ range: ClosedRange<CGFloat>) -> CGFloat { CGFloat.random(in: range) }
 /// Frame-rate-independent form of the `min(1, k * dt)` idiom used throughout this
 /// file, for both first-order lags and per-frame event probabilities.
@@ -135,15 +150,21 @@ struct FlyModel {
     let blurWingL: SCNNode
     let blurWingR: SCNNode
     let abdomen: SCNNode
+    /// Wing cases — beetle forms only, `nil` for the fly. Display-only nodes:
+    /// `updateWings` swings them open, nothing reads them back.
+    var elytraL: SCNNode? = nil
+    var elytraR: SCNNode? = nil
 }
 
 func buildLeg(attach: SCNVector3, baseYaw: CGFloat, swingSign: CGFloat, phase: CGFloat,
-              isFront: Bool, femur: CGFloat, tibia: CGFloat, tarsus: CGFloat) -> Leg {
-    let legColor = NSColor(calibratedRed: 0.33, green: 0.24, blue: 0.14, alpha: 1)
+              isFront: Bool, femur: CGFloat, tibia: CGFloat, tarsus: CGFloat,
+              color: NSColor = NSColor(calibratedRed: 0.33, green: 0.24, blue: 0.14, alpha: 1),
+              thickness: CGFloat = 1) -> Leg {
+    let legColor = color
     let root = SCNNode()
     root.position = attach
 
-    let femurGeo = SCNCapsule(capRadius: 0.48, height: femur)
+    let femurGeo = SCNCapsule(capRadius: 0.48 * thickness, height: femur)
     femurGeo.materials = [mat(legColor)]
     let femurNode = SCNNode(geometry: femurGeo)
     femurNode.eulerAngles = SCNVector3(0, 0, -CGFloat.pi / 2)
@@ -155,7 +176,7 @@ func buildLeg(attach: SCNVector3, baseYaw: CGFloat, swingSign: CGFloat, phase: C
     knee.eulerAngles = SCNVector3(0, 0.75, -0.30 * swingSign)
     root.addChildNode(knee)
 
-    let tibiaGeo = SCNCapsule(capRadius: 0.38, height: tibia)
+    let tibiaGeo = SCNCapsule(capRadius: 0.38 * thickness, height: tibia)
     tibiaGeo.materials = [mat(legColor)]
     let tibiaNode = SCNNode(geometry: tibiaGeo)
     tibiaNode.eulerAngles = SCNVector3(0, 0, -CGFloat.pi / 2)
@@ -167,7 +188,7 @@ func buildLeg(attach: SCNVector3, baseYaw: CGFloat, swingSign: CGFloat, phase: C
     ankle.eulerAngles = SCNVector3(0, 0.35, -0.15 * swingSign)
     knee.addChildNode(ankle)
 
-    let tarsusGeo = SCNCapsule(capRadius: 0.24, height: tarsus)
+    let tarsusGeo = SCNCapsule(capRadius: 0.24 * thickness, height: tarsus)
     tarsusGeo.materials = [mat(legColor.blended(withFraction: 0.25, of: .black) ?? legColor)]
     let tarsusNode = SCNNode(geometry: tarsusGeo)
     tarsusNode.eulerAngles = SCNVector3(0, 0, -CGFloat.pi / 2)
@@ -305,7 +326,7 @@ func buildFlyModel() -> FlyModel {
 final class Fly {
     enum State { case walking, idle, grooming, flying, sleeping }
 
-    let model: FlyModel
+    var model: FlyModel
     var node: SCNNode { model.root }
 
     var pos: CGPoint
@@ -341,13 +362,30 @@ final class Fly {
     var pitch: CGFloat = 0            // body pitch while climbing/descending
     var flapPhase: CGFloat = 0
     var wingRaise: CGFloat = 0        // grounded threat posture (escape-DN driven)
+    var elytraOpen: CGFloat = 0       // display only: 0 closed .. 1 fully spread
     private var brainLive = false
     private var liveArousal: CGFloat = 0
     private var liveWing: CGFloat = 0
 
     init(at p: CGPoint) {
-        model = buildFlyModel()
+        model = buildBody()
         pos = p
+        syncNode()
+    }
+
+    /// Rebuild the body in the current `BODY_FORM`, in place. Behavior state
+    /// (position, gait phase, flight, ledge) is untouched — only geometry swaps.
+    func swapBody() {
+        let old = model.root
+        let parent = old.parent
+        old.removeFromParentNode()
+        model = buildBody()
+        model.root.position = old.position
+        model.root.scale = old.scale
+        model.root.eulerAngles = old.eulerAngles
+        model.blurWingL.isHidden = state != .flying
+        model.blurWingR.isHidden = state != .flying
+        parent?.addChildNode(model.root)
         syncNode()
     }
 
@@ -744,6 +782,7 @@ final class Fly {
                     }
                 }
             }
+            updateElytra(target: wingRaise, dt: dt)
             return
         }
         // visible wing-beat: the wing shapes sweep through a stroke arc,
@@ -760,5 +799,19 @@ final class Fly {
         model.blurWingR.opacity = flick
         model.blurWingL.eulerAngles = SCNVector3(0, 0,  0.45 + stroke * 0.2)
         model.blurWingR.eulerAngles = SCNVector3(0, 0, -0.45 - stroke * 0.2)
+        updateElytra(target: 1, dt: dt)
+    }
+
+    /// Display only. The wing cases swing outward and tip up when airborne or
+    /// when the grounded threat posture is on; they hold that angle rather than
+    /// buzzing along with the hindwings, the way a real beetle flies.
+    private func updateElytra(target: CGFloat, dt: CGFloat) {
+        guard let l = model.elytraL, let r = model.elytraR else { return }
+        elytraOpen += (target - elytraOpen) * lag(10, dt)
+        if elytraOpen < 0.001 { elytraOpen = 0 }
+        let yaw = 0.62 * elytraOpen
+        let lift = 0.85 * elytraOpen
+        l.eulerAngles = SCNVector3(0,  lift, -yaw)
+        r.eulerAngles = SCNVector3(0, -lift,  yaw)
     }
 }
