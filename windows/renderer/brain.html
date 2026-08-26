@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;">
+<title>Fly Brain — FlyWire v783</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #080a10;
+               font: 11px "Segoe UI", system-ui, sans-serif; }
+  canvas { display: block; }
+  #label {
+    position: fixed; left: 50%; bottom: 10px; transform: translateX(-50%);
+    padding: 4px 8px; border-radius: 6px;
+    background: rgba(0, 0, 0, 0.55); color: #f2f2f2; font-weight: 500;
+    white-space: nowrap; pointer-events: none; opacity: 0;
+    transition: opacity 0.15s;
+  }
+  #label.on { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="label"></div>
+<script type="module" src="./brain.js"></script>
+</body>
+</html>

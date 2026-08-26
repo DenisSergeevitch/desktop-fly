@@ -107,6 +107,25 @@ distance-based behavior (`signals: nil` path).
 - Landing must go through the flare (alt decays below 0.035) — never snap
   scale/z in `land()`.
 
+## Windows port (`windows/`)
+
+An Electron + three.js port lives in `windows/`. `Sim.swift` and
+`FlyModel.swift` are ported line-by-line to `windows/src/sim.js` and
+`windows/src/flymodel.js`; both suites came with them
+(`npm run simtest`, `npm run behaviortest` — same invariants, same names).
+**Any change to the sim or to behavior must be mirrored there and both
+JS suites re-run**, otherwise the two platforms drift apart silently.
+
+The rendering and OS layers are rewrites, not ports: SceneKit -> three.js,
+NSPanel -> transparent `BrowserWindow`, `CGWindowList` -> `EnumWindows` via
+koffi. See `windows/README.md` for the full mapping table and its gotchas
+(the big one: Windows clamps a fixed-size window to one monitor, so the
+overlay must stay resizable and the scene must trust `getBounds()`).
+
+Unlike macOS, the Windows overlay spans the whole virtual desktop, so the fly
+walks and flies between monitors on its own; `Fly.screens` keeps it out of the
+dead corners of a non-rectangular layout.
+
 ## Repo conventions
 
 - Public repo: `DenisSergeevitch/desktop-fly` (master). Code MIT; `data/` is
