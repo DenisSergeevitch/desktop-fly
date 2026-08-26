@@ -80,6 +80,7 @@ npm test           # both suites, headless
 
 See [windows/README.md](windows/README.md) for the macOS→Windows mapping
 table and platform notes (the fly there roams all monitors on its own).
+The optional stag-beetle body is macOS-only for now.
 
 ## Controls (menu bar 🪰)
 
