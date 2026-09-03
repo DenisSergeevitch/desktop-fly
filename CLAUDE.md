@@ -132,24 +132,35 @@ distance-based behavior (`signals: nil` path).
 - Landing must go through the flare (alt decays below 0.035) — never snap
   scale/z in `land()`.
 
-## Windows port (`windows/`)
+## Windows port (`windows/`) and Linux port (`linux/`)
 
 An Electron + three.js port lives in `windows/`. `Sim.swift` and
 `FlyModel.swift` are ported line-by-line to `windows/src/sim.js` and
 `windows/src/flymodel.js`; both suites came with them
 (`npm run simtest`, `npm run behaviortest` — same invariants, same names).
-**Any change to the sim or to behavior must be mirrored there and both
-JS suites re-run**, otherwise the two platforms drift apart silently.
+
+The Linux port lives in `linux/`. **It shares `sim.js`, `flymodel.js`, and
+both test suites with `windows/` via git-tracked symlinks** — so a change to
+`windows/src/sim.js` automatically applies to `linux/src/sim.js` and to
+both test runs. **Any change to the sim or to behavior must keep both
+JS suites green (`cd windows && npm test` AND `cd linux && npm test`)**,
+otherwise the three platforms drift apart silently. The sim/body modules
+are the test gate; the rest of each tree is per-platform.
 
 The rendering and OS layers are rewrites, not ports: SceneKit -> three.js,
 NSPanel -> transparent `BrowserWindow`, `CGWindowList` -> `EnumWindows` via
-koffi. See `windows/README.md` for the full mapping table and its gotchas
+koffi (Windows) or `xprop` shell-out (Linux X11). See `windows/README.md`
+for the full mapping table and its gotchas
 (the big one: Windows clamps a fixed-size window to one monitor, so the
 overlay must stay resizable and the scene must trust `getBounds()`).
 
 Unlike macOS, the Windows overlay spans the whole virtual desktop, so the fly
 walks and flies between monitors on its own; `Fly.screens` keeps it out of the
-dead corners of a non-rectangular layout.
+dead corners of a non-rectangular layout. **The Linux overlay is per-monitor
+(macOS-style): one `BrowserWindow` per display, the active display is
+visible, others are hidden to save GPU memory.** The "Send Fly to Next
+Display" tray item hops the active display. See `docs/ubuntu.md` for the
+Linux install, run, and troubleshooting recipes.
 
 ## Repo conventions
 

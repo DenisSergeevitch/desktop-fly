@@ -82,6 +82,23 @@ See [windows/README.md](windows/README.md) for the macOS→Windows mapping
 table and platform notes (the fly there roams all monitors on its own).
 The optional stag-beetle body is macOS-only for now.
 
+### Linux
+
+A second Electron + three.js port lives in [`linux/`](linux/) — same
+connectome, same circuit, same suites (shared with `windows/` via symlinks).
+Per-monitor overlay, X11 + Wayland. Requires Ubuntu 24.04 (or any modern
+Linux) and a local NVIDIA dGPU. Full install + troubleshooting in
+[`docs/ubuntu.md`](docs/ubuntu.md):
+
+```sh
+sudo apt install -y nodejs npm xvfb x11-utils xdotool wmctrl \
+  nvidia-driver-580 libegl1 libgl1 libvulkan1
+cd desktop-fly/linux
+npm install
+npm start          # tray icon 🪰; quit from there
+npm test           # both suites, headless
+```
+
 ## Controls (menu bar 🪰)
 
 | item | effect |

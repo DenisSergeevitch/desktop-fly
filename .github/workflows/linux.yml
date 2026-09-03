@@ -1,0 +1,53 @@
+name: linux
+
+on:
+  push:
+    paths:
+      - 'linux/**'
+      - 'windows/src/**'
+      - 'windows/test/**'
+      - '.github/workflows/linux.yml'
+  pull_request:
+    paths:
+      - 'linux/**'
+      - 'windows/src/**'
+      - 'windows/test/**'
+      - '.github/workflows/linux.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: 'linux/package-lock.json'
+
+      - name: Install OS dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool wmctl
+          # wmctl is sometimes misspelled; the correct package is wmctrl.
+          sudo apt-get install -y wmctrl || true
+
+      - name: Install
+        working-directory: linux
+        run: npm install
+
+      - name: simtest
+        working-directory: linux
+        run: xvfb-run -a npm run simtest
+
+      - name: behaviortest
+        working-directory: linux
+        run: xvfb-run -a npm run behaviortest
+
+      - name: scaffold + os + senses + main + snapshot gates
+        working-directory: linux
+        run: |
+          node test/scaffold.test.js
+          node --test test/os.test.js test/x11.test.js test/wayland.test.js
+          node --test test/main.test.js test/snapshot.test.js
+          node --test test/ci.test.js
