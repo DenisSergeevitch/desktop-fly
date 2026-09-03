@@ -7,7 +7,7 @@
 import * as THREE from '../node_modules/three/build/three.module.js';
 import { LIFSim, SpikeBus } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
-import { Fly, SHADOWS_ENABLED } from '../src/flymodel.js';
+import { Fly, SHADOWS_ENABLED, setEscapeRateMul } from '../src/flymodel.js';
 import { clampf, rnd, lag } from '../src/util.js';
 
 const api = window.flyAPI;
@@ -296,6 +296,10 @@ api.onAmbient((a) => {
   sleepy = a.sleepy;
   tempo = a.tempo;
   activity = a.activity;
+  // Linux main process may push a multiplicative override on the spontaneous
+  // escape probability. Default 1 (Windows sends no such field) keeps the
+  // connectome's baseline behavior untouched.
+  if (typeof a.escapeRateMul === 'number') setEscapeRateMul(a.escapeRateMul);
 });
 
 api.onTerrain((snap) => {

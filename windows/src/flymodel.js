@@ -19,14 +19,52 @@ import { rnd, clampf, angleDiff, smoothstep, lag, TUNED_HZ } from './util.js';
 import { makeSignals } from './sim.js';
 
 export const SHADOWS_ENABLED = true;
-export const FLY_SCALE = 1.15;
+export const FLY_SCALE = 5.0;    // large enough to see at 1920x1080
 export const EDGE_MARGIN = 50;
+
+// MARK: - Theme
+//
+// One struct holds every visual customization of the fly body so swapping
+// themes is a single-assignment change. The keys are material slots; the
+// values are either a hex int (0xRRGGBB) or an [r,g,b] triple in 0..1 linear
+// space. The default theme is the original pale fruit-fly; alternative
+// themes (orange, beetle, ...) override the whole struct at once.
+export const FLY_THEMES = {
+  fruitfly: {
+    body: 0xf2eded,                  // pale off-white thorax
+    head:  0xffffff,
+    eye:   0x202020,                 // dark eyes
+    abdomen: 0xefe9dd,               // cream abdomen
+    wingVein: 0x555555,
+    wingFleck: 0xcc1f1f,             // red haltere/wingtip fleck
+    leg:   0x222222,
+  },
+  orange: {
+    body:    0xff6a00,               // bright orange thorax
+    head:    0xff8a33,
+    eye:     0x101010,
+    abdomen: 0xff7a1a,               // slightly lighter orange belly
+    wingVein: 0x222222,
+    wingFleck: 0xfff2a0,             // pale gold wingtip
+    leg:    0x1a1a1a,
+  },
+};
+export let FLY_THEME = FLY_THEMES.orange;   // current theme (let — swappable)
 // How close the fly's centre may get to the edge of the desktop while walking.
 // The body is ~30 px tall at FLY_SCALE, so the macOS value of 20 let the head
 // slide under the screen edge; this keeps the whole body on screen.
 export const EDGE_CLAMP = 45;
 export const SCARE_RADIUS = 110;     // legacy behavior (non-connectome flies) only
 export const NERVOUS_RADIUS = 240;   // legacy behavior only
+
+// User-tunable multiplier on the spontaneous-takeoff rate. Default 1.0 leaves
+// the connectome-driven escape chance untouched (Windows / macOS / default
+// Linux). Set from a CLI flag or env var via overlay.js#onAmbient to make the
+// fly more/less likely to suddenly take off without an obvious stimulus.
+let _escapeRateMul = 1.0;
+export function getEscapeRateMul() { return _escapeRateMul; }
+export function setEscapeRateMul(v) { if (Number.isFinite(v) && v >= 0) _escapeRateMul = v; }
+export const ESCAPE_RATE_MUL = 1.0;   // legacy read-only shim — see getEscapeRateMul
 
 // Heading random-walk amplitude, rad/sqrt(s). The variance of a random walk
 // grows with dt, not dt^2, so the old `rnd(-1, 1) * 1.6 * dt` form made the
@@ -109,7 +147,7 @@ export class Leg {
 }
 
 function buildLeg(attach, baseYaw, swingSign, phase, isFront, femur, tibia, tarsus) {
-  const legColor = srgb(0.33, 0.24, 0.14);
+  const legColor = new THREE.Color(FLY_THEME.leg);
   const root = new THREE.Object3D();
   root.position.set(attach[0], attach[1], attach[2]);
 
@@ -169,35 +207,39 @@ export function buildFlyModel() {
   const root = new THREE.Object3D();
   root.scale.set(FLY_SCALE, FLY_SCALE, FLY_SCALE);
 
-  const bodyBrown = srgb(0.50, 0.38, 0.22);
+  // Theme helper: every body material pulls its colour from FLY_THEME so
+  // swapping themes is a single assignment. `t('body')` is the thorax base;
+  // head and abdomen get their own keys. Eyes, antennae, proboscis, and
+  // legs all reuse the same `leg`/`eye` keys for a coherent look.
+  const t = (k) => new THREE.Color(FLY_THEME[k]);
+  const tHex = (k) => FLY_THEME[k];
 
   const thorax = new THREE.Mesh(new THREE.SphereGeometry(4.6, 28, 20),
-                                mat(bodyBrown, 0.35, 0.4));
+                                mat(t('body'), 0.35, 0.4));
   thorax.position.set(0, 2.5, 6.2);
   thorax.scale.set(0.95, 1.15, 0.85);
   root.add(thorax);
 
   const abdMat = new THREE.MeshPhongMaterial({
-    color: 0xffffff,
+    color: tHex('abdomen'),          // theme abdomen colour; the original
+                                     // abdomen banding texture would always
+                                     // paint brown over it, hiding the theme.
     specular: new THREE.Color(0.3, 0.3, 0.3),
     shininess: 35,
   });
-  const abdTex = abdomenTexture();
-  if (abdTex) abdMat.map = abdTex;
-  else abdMat.color = srgb(0.60, 0.44, 0.24);   // headless: flat body colour
   const abdomen = new THREE.Mesh(new THREE.SphereGeometry(5.0, 28, 20), abdMat);
   abdomen.position.set(0, -6.5, 5.6);
   abdomen.scale.set(0.9, 1.5, 0.75);
   root.add(abdomen);
 
   const head = new THREE.Mesh(new THREE.SphereGeometry(3.0, 24, 16),
-                              mat(blendWhite(bodyBrown, 0.15)));
+                              mat(blendWhite(t('body'), 0.15)));
   head.position.set(0, 9.0, 6.0);
   head.scale.set(1.0, 0.85, 0.9);
   root.add(head);
 
   const eyeGeo = new THREE.SphereGeometry(2.0, 22, 16);
-  const eyeMat = mat(srgb(0.62, 0.10, 0.07), 0.9, 0.9);
+  const eyeMat = mat(t('eye'), 0.9, 0.9);
   for (const side of [-1, 1]) {
     const eye = new THREE.Mesh(eyeGeo, eyeMat);
     eye.position.set(side * 2.1, 9.7, 6.4);
@@ -206,7 +248,7 @@ export function buildFlyModel() {
   }
 
   const antGeo = new THREE.CapsuleGeometry(0.16, 2.2 - 0.32, 4, 8);
-  const antMat = mat(srgb(0.3, 0.22, 0.13));
+  const antMat = mat(t('leg'));
   for (const side of [-1, 1]) {
     const ant = new THREE.Mesh(antGeo, antMat);
     ant.position.set(side * 0.9, 11.6, 6.3);
@@ -215,7 +257,7 @@ export function buildFlyModel() {
   }
 
   const prob = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.22, 2.4, 16),
-                              mat(srgb(0.35, 0.26, 0.16)));
+                              mat(t('leg')));
   prob.position.set(0, 10.4, 4.6);
   prob.rotation.set(-0.5, 0, 0);
   root.add(prob);
@@ -588,7 +630,7 @@ export class Fly {
     }
     // spontaneous takeoff, gated on whole-population arousal; flight
     // altitude/effort scales with how aroused the network is
-    const flightChance = s.arousal > 0.5 ? 0.6 : 0.005;
+    const flightChance = (s.arousal > 0.5 ? 0.6 : 0.005) * getEscapeRateMul();
     if (this.state === 'walking' && rnd(0, 1) < lag(flightChance, dt)) {
       this.startFlight(bounds, { effort: 0.35 + s.arousal * 0.6 });
     }
