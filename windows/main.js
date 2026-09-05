@@ -331,6 +331,7 @@ app.whenReady().then(() => {
   if (brainData) {
     dataInfo = `FlyWire v783 · ${brainData.points.points.length} somas · `
       + `circuit ${brainData.circuit.neurons.length}n/${brainData.circuit.edges.length}e`;
+    if (brainData.locomotor) dataInfo += ` · MaleCNS ${brainData.locomotor.neurons.length}n`;
   }
   if (!win32Available()) {
     process.stderr.write('win32: running without window terrain (koffi unavailable)\n');

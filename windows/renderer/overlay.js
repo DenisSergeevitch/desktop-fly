@@ -5,7 +5,7 @@
 // relative rather than bare so the same module resolves in Node (tests)
 // and in the renderer without an inline importmap
 import * as THREE from '../node_modules/three/build/three.module.js';
-import { LIFSim, SpikeBus } from '../src/sim.js';
+import { LIFSim, SpikeBus, SimulationClock } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
 import { Fly, SHADOWS_ENABLED } from '../src/flymodel.js';
 import { clampf, rnd, lag } from '../src/util.js';
@@ -81,6 +81,7 @@ const flies = [];
 let sim = null;
 let spikeBus = null;
 const signalBuilder = new SignalBuilder();
+const simulationClock = new SimulationClock();
 
 let lastTime = null;
 let paused = false;
@@ -240,12 +241,16 @@ function computeLoom(fly, mouse, dt) {
 
 function frame(tMs) {
   requestAnimationFrame(frame);
-  if (paused) { lastTime = null; return; }
+  if (paused) { lastTime = null; simulationClock.reset(); return; }
   const t = tMs / 1000;
   if (lastTime === null) { lastTime = t; return; }
   const dt = Math.min(0.05, Math.max(0, t - lastTime));
   lastTime = t;
+  simulationClock.advance(dt, tick);
+  renderer.render(scene, camera);
+}
 
+function tick(dt) {
   let signals = null;
   const first = flies[0];
   if (sim && first) {
@@ -259,6 +264,7 @@ function frame(tMs) {
     // body -> brain: leg proprioception from the current gait
     sim.gaitDrive = first.walkingIntensity;
     sim.gaitPhase = first.gaitPhasePublic;
+    sim.legFeedback = first.legFeedback;
     // circadian + sleep neuromodulation. Compressed: the LIF neurons sit
     // just below threshold, so a raw multiplier silences them entirely —
     // siesta should mean "less active", not comatose.
@@ -285,7 +291,6 @@ function frame(tMs) {
     flies[i].update(dt, bounds, mouseScene, i === 0 ? signals : null);
   }
 
-  renderer.render(scene, camera);
 }
 
 // ---- wiring ----
@@ -359,7 +364,9 @@ api.onStimulate((req) => {
   const data = await api.getBrainData();
   if (data) {
     spikeBus = new SpikeBus();
-    sim = new LIFSim(data.circuit, spikeBus);
+    sim = new LIFSim(data.circuit, spikeBus, data.locomotor);
+    console.info(`Initialized WebGL renderer and ${sim.n} FlyWire neurons; `
+      + `${sim.locomotor?.n || 0} MaleCNS neurons; feedback clock 120 Hz`);
   } else {
     console.warn('no data/ — the fly falls back to legacy distance-based behavior');
   }

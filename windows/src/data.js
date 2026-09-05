@@ -20,11 +20,21 @@ export function findDataDir() {
 
 export function loadBrainData(dir = findDataDir()) {
   if (!dir) return null;
+  let points, circuit;
   try {
-    const points = JSON.parse(fs.readFileSync(path.join(dir, 'brain_points.json'), 'utf8'));
-    const circuit = JSON.parse(fs.readFileSync(path.join(dir, 'circuit.json'), 'utf8'));
-    return { points, circuit };
-  } catch {
+    points = JSON.parse(fs.readFileSync(path.join(dir, 'brain_points.json'), 'utf8'));
+    circuit = JSON.parse(fs.readFileSync(path.join(dir, 'circuit.json'), 'utf8'));
+  } catch (error) {
+    console.warn(`Unable to load fly data from ${dir}: ${error.message}`);
     return null;
   }
+  // Older bundles remain usable. A present but invalid nerve-cord dataset
+  // is a load error, never a silent switch back to scripted locomotion.
+  const locomotorPath = path.join(dir, 'locomotor_circuit.json');
+  let locomotor = null;
+  if (fs.existsSync(locomotorPath)) {
+    try { locomotor = JSON.parse(fs.readFileSync(locomotorPath, 'utf8')); }
+    catch (error) { throw new Error(`Invalid locomotor dataset ${locomotorPath}: ${error.message}`); }
+  }
+  return { points, circuit, locomotor };
 }

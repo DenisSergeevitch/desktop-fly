@@ -5,6 +5,25 @@
 //
 // Runs unchanged in Electron's renderer and in bare Node (the test suites).
 
+import { LocomotorSim } from './locomotor.js';
+
+// The complete sensory/neural/mechanical feedback loop runs at 120 Hz,
+// independent of display refresh. Each tick contains 8/8/9 neural ms and
+// five 600 Hz mechanics substeps; rendering may display multiple ticks.
+export class SimulationClock {
+  static fixedDT = 1 / 120;
+  constructor() { this.accumulator = 0; }
+  reset() { this.accumulator = 0; }
+  advance(elapsed, tick) {
+    if (!Number.isFinite(elapsed) || elapsed <= 0) return;
+    this.accumulator += Math.min(0.1, elapsed);
+    while (this.accumulator + 1e-10 >= SimulationClock.fixedDT) {
+      this.accumulator -= SimulationClock.fixedDT;
+      tick(SimulationClock.fixedDT);
+    }
+  }
+}
+
 // What the brain tells the body each frame.
 export function makeSignals() {
   return {
@@ -18,6 +37,7 @@ export function makeSignals() {
     arousal: 0,        // whole-population activity, ~0..1
     tempo: 1,          // thermal "temperature" scaling of locomotion
     sleep: false,      // circadian + idle -> sleep-like state
+    legCommands: null, // RF LF RM LM RH LH antagonist motor outputs; null = legacy bundle
   };
 }
 
@@ -35,7 +55,9 @@ export class SpikeBus {
 }
 
 export class LIFSim {
-  constructor(circuit, spikeBus = null) {
+  constructor(circuit, spikeBus = null, locomotorCircuit = null) {
+    this.locomotor = locomotorCircuit ? new LocomotorSim(locomotorCircuit) : null;
+    this.legFeedback = [];
     this.spikeBus = spikeBus;
     const neurons = circuit.neurons;
     const n = neurons.length;
@@ -105,6 +127,23 @@ export class LIFSim {
         default: this.baseline[i] = 0.002; break;   // gf: quiet unless synaptically driven
       }
     }
+
+    // Preserve exact cell type and hemisphere across the specimen interface.
+    this.cordSourceGroups = [];
+    this.cordSourceOf = new Int32Array(n).fill(-1);
+    const groupByKey = new Map();
+    neurons.forEach((nr, i) => {
+      if (!['DNp09', 'DNa01', 'DNa02', 'MDN'].includes(nr.type)) return;
+      const key = `${nr.type}:${nr.side}`;
+      if (!groupByKey.has(key)) {
+        groupByKey.set(key, this.cordSourceGroups.length);
+        this.cordSourceGroups.push({ type: nr.type, side: nr.side, count: 0 });
+      }
+      const group = groupByKey.get(key);
+      this.cordSourceGroups[group].count++;
+      this.cordSourceOf[i] = group;
+    });
+    this.cordSourceRates = new Float32Array(this.cordSourceGroups.length);
 
     // hot-loop lookups (Swift used string switches and dnaL.contains)
     // 1 loom, 2 dnaL, 3 dnaR, 4 mdn, 5 fwd, 6 groom, 7 escw, 8 gf
@@ -204,6 +243,7 @@ export class LIFSim {
 
   step(ms) {
     if (!(ms > 0)) return;
+    if (this.locomotor) this.locomotor.feedback = this.legFeedback;
     for (const p of this.pendingStims) {
       p.untilMs = this.simMs + p.durationMs;
       this.activeStims.push(p);
@@ -239,7 +279,7 @@ export class LIFSim {
         for (const i of this.loomRight) v[i] += d;
       }
       // body -> brain: gait rhythm into ascending (proprioceptive) neurons
-      if (this.gaitDrive > 0.001) {
+      if (!this.locomotor && this.gaitDrive > 0.001) {
         const ph = this.gaitPhase * 2 * Math.PI;
         for (let k = 0; k < this.ascend.length; k++) {
           v[this.ascend[k]] += this.gaitDrive * 0.09
@@ -308,6 +348,17 @@ export class LIFSim {
       this.rateGroom += (cG * 1000 / Math.max(1, this.groom.length) - this.rateGroom) * a;
       this.rateEscW += (cW * 1000 / Math.max(1, this.escw.length) - this.rateEscW) * a;
       this.ratePop += (nSpiked * 1000 / Math.max(1, n) - this.ratePop) * a;
+
+      if (this.locomotor) {
+        for (let i = 0; i < this.cordSourceRates.length; i++) this.cordSourceRates[i] *= 1 - a;
+        for (let s = 0; s < nSpiked; s++) {
+          const group = this.cordSourceOf[spiked[s]];
+          if (group >= 0) this.cordSourceRates[group] += 1000 * a / this.cordSourceGroups[group].count;
+        }
+        this.cordSourceGroups.forEach((group, i) =>
+          this.locomotor.setDescending(group.type, group.side, this.cordSourceRates[i]));
+        this.locomotor.step(1);
+      }
 
       if (this.spikeBus) {
         const stride = Math.max(1, Math.floor(nSpiked / 12));   // sample under heavy activity

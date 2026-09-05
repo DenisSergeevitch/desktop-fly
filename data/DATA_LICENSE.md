@@ -20,3 +20,13 @@ Please cite:
 
 FlyWire is a project of Princeton University and collaborators; see
 https://flywire.ai for full terms and community guidelines.
+
+## MaleCNS supplement
+
+`locomotor_circuit.json` and `locomotor_report.json` are separately derived from
+the [MaleCNS v1.0 public connectome](https://male-cns.janelia.org/download/) and
+are licensed under **CC BY 4.0**, matching that source. Attribute the MaleCNS
+collaboration (FlyEM/HHMI Janelia, University of Cambridge, MRC Laboratory of
+Molecular Biology, and Google Research). See [LOCOMOTOR_PROVENANCE.md](LOCOMOTOR_PROVENANCE.md)
+for exact source hashes, reproduction, extraction scope, and modeling limits.
+This addition does not change the license of the original FlyWire-derived files.

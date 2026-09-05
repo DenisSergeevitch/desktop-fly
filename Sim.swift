@@ -5,6 +5,69 @@
 import Foundation
 import simd
 
+// Opt-in, repeatable test stimuli. Without reset(), every call below delegates
+// to the same platform RNG used by the application before test seeding existed.
+// The test stream matches windows/test/random.js: FNV-1a(label), then LCG32.
+enum TestRandom {
+    private static var state: UInt32?
+
+    @discardableResult
+    static func reset(_ label: String = "desktop-fly-tests") -> UInt32 {
+        var seed: UInt32 = 2_166_136_261
+        for character in label.utf16 { seed = (seed ^ UInt32(character)) &* 16_777_619 }
+        state = seed
+        return seed
+    }
+
+    private static func unit() -> Double? {
+        guard let current = state else { return nil }
+        let next = current &* 1_664_525 &+ 1_013_904_223
+        state = next
+        return Double(next) / 4_294_967_296
+    }
+
+    static func float(in range: ClosedRange<Float>) -> Float {
+        guard let u = unit() else { return Float.random(in: range) }
+        return range.lowerBound + (range.upperBound - range.lowerBound) * Float(u)
+    }
+
+    static func float(in range: ClosedRange<Float>, using rng: inout SystemRandomNumberGenerator) -> Float {
+        guard let u = unit() else { return Float.random(in: range, using: &rng) }
+        return range.lowerBound + (range.upperBound - range.lowerBound) * Float(u)
+    }
+
+    static func cgFloat(in range: ClosedRange<CGFloat>) -> CGFloat {
+        guard let u = unit() else { return CGFloat.random(in: range) }
+        return range.lowerBound + (range.upperBound - range.lowerBound) * CGFloat(u)
+    }
+
+    static func integer(in range: Range<Int>) -> Int {
+        guard let u = unit() else { return Int.random(in: range) }
+        return range.lowerBound + min(range.count - 1, Int(u * Double(range.count)))
+    }
+
+    static func integer(in range: ClosedRange<Int>, using rng: inout SystemRandomNumberGenerator) -> Int {
+        guard let u = unit() else { return Int.random(in: range, using: &rng) }
+        let count = range.upperBound - range.lowerBound + 1
+        return range.lowerBound + min(count - 1, Int(u * Double(count)))
+    }
+}
+
+// Run the entire closed loop on a fixed clock; render frequency must not change
+// sensory sample/hold duration in the fast nerve-cord dynamics.
+final class SimulationClock {
+    static let tick: CGFloat = 1 / 120
+    private var accumulator: CGFloat = 0
+    func advance(_ elapsed: CGFloat, tick: (CGFloat) -> Void) {
+        guard elapsed.isFinite, elapsed > 0 else { return }
+        accumulator += min(0.1, elapsed)
+        while accumulator + 1e-10 >= Self.tick {
+            accumulator -= Self.tick
+            tick(Self.tick)
+        }
+    }
+}
+
 // What the brain tells the body each frame.
 struct BrainSignals {
     var escape = false        // giant fiber spiked -> takeoff NOW
@@ -17,6 +80,7 @@ struct BrainSignals {
     var arousal: CGFloat = 0    // whole-population activity, ~0..1
     var tempo: CGFloat = 1      // thermal "temperature" scaling of locomotion
     var sleep = false           // circadian + idle -> sleep-like state
+    var legCommands: [LegMotorCommand]? = nil // MaleCNS motor output, RF LF RM LM RH LH
 }
 
 struct BrainPointsFile: Decodable {
@@ -46,14 +110,17 @@ func findDataDir() -> URL? {
     return candidates.first { fm.fileExists(atPath: $0.appendingPathComponent("circuit.json").path) }
 }
 
-func loadBrainData() -> (points: BrainPointsFile, circuit: CircuitFile)? {
+func loadBrainData() -> (points: BrainPointsFile, circuit: CircuitFile, locomotor: LocomotorCircuitFile)? {
     guard let dir = findDataDir(),
           let pData = try? Data(contentsOf: dir.appendingPathComponent("brain_points.json")),
           let cData = try? Data(contentsOf: dir.appendingPathComponent("circuit.json")),
+          let lData = try? Data(contentsOf: dir.appendingPathComponent("locomotor_circuit.json")),
           let points = try? JSONDecoder().decode(BrainPointsFile.self, from: pData),
-          let circuit = try? JSONDecoder().decode(CircuitFile.self, from: cData)
+          let circuit = try? JSONDecoder().decode(CircuitFile.self, from: cData),
+          let locomotor = try? JSONDecoder().decode(LocomotorCircuitFile.self, from: lData),
+          locomotor.validate()
     else { return nil }
-    return (points, circuit)
+    return (points, circuit, locomotor)
 }
 
 // Thread-safe spike hand-off from the sim (fly render loop) to the brain window.
@@ -73,6 +140,11 @@ final class SpikeBus {
 }
 
 final class LIFSim {
+    let locomotor: LocomotorSim?
+    var legFeedback: [LegFeedback] = []
+    private var cordSourceGroups: [(type: String, side: String, count: Int)] = []
+    private var cordSourceOf: [Int] = []
+    private var cordSourceRates: [Float] = []
     let n: Int
     let roles: [String]
     let types: [String]
@@ -160,7 +232,8 @@ final class LIFSim {
         stimLock.unlock()
     }
 
-    init(circuit: CircuitFile, spikeBus: SpikeBus?) {
+    init(circuit: CircuitFile, spikeBus: SpikeBus?, locomotorCircuit: LocomotorCircuitFile? = nil) {
+        locomotor = locomotorCircuit.map { LocomotorSim(circuit: $0) }
         self.spikeBus = spikeBus
         n = circuit.neurons.count
         roles = circuit.neurons.map { $0.role }
@@ -192,14 +265,14 @@ final class LIFSim {
             default: break
             }
         }
-        ascendPhase = ascend.map { _ in Float.random(in: 0...(2 * Float.pi)) }
+        ascendPhase = ascend.map { _ in TestRandom.float(in: 0...(2 * Float.pi)) }
 
         // Heterogeneous baseline drive: interneurons get enough to crackle at a
         // few Hz; sensory and command neurons stay quiet unless driven.
         var base = [Float](repeating: 0, count: n)
         for i in 0..<n {
             switch circuit.neurons[i].role {
-            case "other": base[i] = Float.random(in: 0.010...0.070)
+            case "other": base[i] = TestRandom.float(in: 0.010...0.070)
             case "lc4", "lplc2": base[i] = 0.004
             // command DNs get deterministic, side-symmetric baselines: their
             // asymmetries and bursts must come from network dynamics, not luck
@@ -209,6 +282,23 @@ final class LIFSim {
             }
         }
         baseline = base
+        // Keep DNa01 and DNa02 separate across the specimen interface. Their
+        // combined steering readout is useful to the legacy body, but copying
+        // that pooled rate into both male cell types erases cell identity.
+        cordSourceOf = Array(repeating: -1, count: n)
+        var groupByKey: [String: Int] = [:]
+        for (i, nr) in circuit.neurons.enumerated()
+            where ["DNp09", "DNa01", "DNa02", "MDN"].contains(nr.type) {
+            let key = "\(nr.type):\(nr.side)"
+            let group: Int
+            if let existing = groupByKey[key] { group = existing }
+            else {
+                group = cordSourceGroups.count; groupByKey[key] = group
+                cordSourceGroups.append((nr.type, nr.side, 0)); cordSourceRates.append(0)
+            }
+            cordSourceGroups[group].count += 1
+            cordSourceOf[i] = group
+        }
 
         // CSR
         var counts = [Int](repeating: 0, count: n)
@@ -242,6 +332,7 @@ final class LIFSim {
 
     func step(_ ms: Int) {
         guard ms > 0 else { return }
+        locomotor?.feedback = legFeedback
         stimLock.lock()
         for var p in pendingStims {
             p.untilMs = simMs + p.durationMs
@@ -256,20 +347,20 @@ final class LIFSim {
             simMs += 1
             if simMs >= burstNext {
                 burstUntil = simMs + 400
-                burstNext = simMs + Int.random(in: 15_000...40_000, using: &rng)
+                burstNext = simMs + TestRandom.integer(in: 15_000...40_000, using: &rng)
             }
             let p = (simMs < burstUntil ? pNoise * 6 : pNoise) * activityScale
 
             for i in 0..<n {
                 if refr[i] > 0 { refr[i] -= 1; v[i] *= decay; continue }
                 var vi = v[i] * decay + baseline[i] * activityScale
-                if Float.random(in: 0...1, using: &rng) < p { vi += noiseKick }
+                if TestRandom.float(in: 0...1, using: &rng) < p { vi += noiseKick }
                 v[i] = vi
             }
             if loomL > 0.001 { for i in loomLeft { v[i] += loomL * loomGain * sensoryGate } }
             if loomR > 0.001 { for i in loomRight { v[i] += loomR * loomGain * sensoryGate } }
             // body -> brain: gait rhythm into ascending (proprioceptive) neurons
-            if gaitDrive > 0.001 {
+            if locomotor == nil && gaitDrive > 0.001 {
                 let ph = gaitPhase * 2 * Float.pi
                 for (k, i) in ascend.enumerated() {
                     v[i] += gaitDrive * 0.09 * (0.5 + 0.5 * sin(ph + ascendPhase[k]))
@@ -327,6 +418,18 @@ final class LIFSim {
             rateGroom += (Float(cG) * 1000 / Float(max(1, groom.count)) - rateGroom) * rateAlpha
             rateEscW += (Float(cW) * 1000 / Float(max(1, escw.count)) - rateEscW) * rateAlpha
             ratePop  += (Float(spiked.count) * 1000 / Float(max(1, n)) - ratePop) * rateAlpha
+
+            if let cord = locomotor {
+                for i in cordSourceRates.indices { cordSourceRates[i] *= 1 - rateAlpha }
+                for i in spiked where cordSourceOf[i] >= 0 {
+                    let group = cordSourceOf[i]
+                    cordSourceRates[group] += 1000 * rateAlpha / Float(cordSourceGroups[group].count)
+                }
+                for (i, group) in cordSourceGroups.enumerated() {
+                    cord.setDescending(group.type, side: group.side, rate: cordSourceRates[i])
+                }
+                cord.step(1)
+            }
 
             if spikeBus != nil {
                 let stride = max(1, spiked.count / 12)   // sample under heavy activity

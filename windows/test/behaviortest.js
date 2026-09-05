@@ -2,6 +2,7 @@
 // 18 end-to-end sim -> body checks. MUST pass after any behavior change.
 //   node test/behaviortest.js
 
+import { resetRandom } from './random.js';
 import { loadBrainData } from '../src/data.js';
 import { LIFSim, makeSignals } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
@@ -18,7 +19,8 @@ let failures = 0;
 const f = (x, d = 2) => x.toFixed(d);
 const sign = (x, d = 2) => (x >= 0 ? '+' : '') + x.toFixed(d);
 
-function scenario(name, { stim, hold, setup = null, check, describe }) {
+function scenario(name, { stim, hold, setup = null, isolateForward = false, check, describe }) {
+  resetRandom(name);
   const sim = new LIFSim(data.circuit, null);
   const builder = new SignalBuilder();
   const fly = new Fly({ x: 0, y: 0 });
@@ -35,6 +37,9 @@ function scenario(name, { stim, hold, setup = null, check, describe }) {
     frames--;
     sim.step(Math.round(dt * 1000));
     const s = builder.make(sim, dt);
+    // Isolate forward recruitment from a competing spontaneous grooming bout;
+    // the separate DNg11 scenario still verifies the grooming pathway.
+    if (isolateForward) s.groomDrive = 0;
     fly.update(dt, bounds, null, s);
     if (check(fly)) { passed = true; break; }
   }
@@ -57,6 +62,7 @@ scenario('DNg11 stim -> grooming', {
 });
 
 scenario('DNp09 stim -> walks, speed rises (capped)', {
+  isolateForward: true,
   stim: (s) => s.stimulate(s.fwd, 0.25, 1200),
   hold: 1.5,
   check: (fly) => fly.state === 'walking' && fly.speed > 40 && fly.speed < 100,
@@ -100,6 +106,7 @@ scenario('tap near fly -> startle escape via sensory pathway', {
 
 // ---- body-level environment checks (hand-built signals, no sim) ----
 function bodyCheck(name, run) {
+  resetRandom(name);
   const [ok, detail] = run();
   if (!ok) failures++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}: ${detail}`);

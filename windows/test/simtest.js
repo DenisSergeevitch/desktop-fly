@@ -2,6 +2,7 @@
 // Circuit invariants. MUST pass after any sim/etl change.
 //   node test/simtest.js
 
+import './random.js';
 import { loadBrainData } from '../src/data.js';
 import { LIFSim } from '../src/sim.js';
 

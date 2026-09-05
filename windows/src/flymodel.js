@@ -17,6 +17,7 @@
 import * as THREE from '../node_modules/three/build/three.module.js';
 import { rnd, clampf, angleDiff, smoothstep, lag, TUNED_HZ } from './util.js';
 import { makeSignals } from './sim.js';
+import { LegDynamics, SixLegDynamics } from './legdynamics.js';
 
 export const SHADOWS_ENABLED = true;
 export const FLY_SCALE = 1.15;
@@ -93,19 +94,32 @@ export function abdomenTexture() {
 }
 
 export class Leg {
-  constructor(root, baseYaw, swingSign, phase, isFront) {
+  constructor(root, knee, ankle, geometry, baseYaw, swingSign, phase, isFront) {
     this.root = root;
+    this.knee = knee;
+    this.ankle = ankle;
+    this.geometry = geometry;
     this.baseYaw = baseYaw;
     this.swingSign = swingSign;
     this.phase = phase;
     this.isFront = isFront;
     this.angle = 0;
     this.lift = 0;
+    this.kneeAngle = 0.75;
   }
 
-  apply() {
-    this.root.rotation.set(0, -this.lift, this.baseYaw + this.swingSign * this.angle);
+  apply(feedback = null) {
+    if (feedback) {
+      this.angle = feedback.hipAngle;
+      this.lift = feedback.elevationAngle;
+      this.kneeAngle = feedback.kneeAngle;
+    }
+    // All controllers share the same articulated coordinate system.
+    this.root.rotation.set(0, -this.lift, this.baseYaw + this.swingSign * this.angle, 'ZYX');
+    this.knee.rotation.set(0, this.kneeAngle, 0);
+    this.ankle.rotation.set(0, LegDynamics.ankleAngle, 0);
   }
+
 }
 
 function buildLeg(attach, baseYaw, swingSign, phase, isFront, femur, tibia, tarsus) {
@@ -142,15 +156,17 @@ function buildLeg(attach, baseYaw, swingSign, phase, isFront, femur, tibia, tars
   tarsusNode.position.set(tarsus / 2, 0, 0);
   ankle.add(tarsusNode);
 
-  const leg = new Leg(root, baseYaw, swingSign, phase, isFront);
+  const geometry = { attachX: attach[0], attachY: attach[1], attachZ: attach[2],
+    baseYaw, side: swingSign, femur, tibia, tarsus };
+  const leg = new Leg(root, knee, ankle, geometry, baseYaw, swingSign, phase, isFront);
   leg.apply();
   return leg;
 }
 
 function wingMesh() {
-  // NSBezierPath(ovalIn: NSRect(x: -2.6, y: -15.5, width: 5.2, height: 16.5))
+  // NSBezierPath(ovalIn: NSRect(x: -2.6, y: -16.5, width: 5.2, height: 16.5))
   const shape = new THREE.Shape();
-  shape.absellipse(0, -15.5 + 16.5 / 2, 2.6, 16.5 / 2, 0, 2 * Math.PI, false, 0);
+  shape.absellipse(0, -16.5 + 16.5 / 2, 2.6, 16.5 / 2, 0, 2 * Math.PI, false, 0);
   const geo = new THREE.ExtrudeGeometry(shape, { depth: 0.12, bevelEnabled: false, curveSegments: 24 });
   geo.translate(0, 0, -0.06);   // SCNShape extrudes symmetrically about z = 0
   const m = new THREE.MeshPhongMaterial({
@@ -240,7 +256,7 @@ export function buildFlyModel() {
   const foldedWings = new THREE.Object3D();
   for (const side of [-1, 1]) {
     const wing = wingMesh();
-    wing.position.set(side * 1.6, 0.5, side > 0 ? 7.7 : 7.55);
+    wing.position.set(side * 1.6, 0.5, side > 0 ? 10.4 : 10.25);
     wing.rotation.set(0, 0, side * 0.13);
     foldedWings.add(wing);
   }
@@ -255,7 +271,7 @@ export function buildFlyModel() {
       depthWrite: false,
     });
     const n = new THREE.Mesh(new THREE.SphereGeometry(1.0, 16, 12), m);
-    n.position.set(side * 6.0, 1.5, 8.2);
+    n.position.set(side * 8.4, -2.8, 10.65);
     n.scale.set(5.5, 2.4, 0.3);
     n.rotation.set(0, 0, side * -0.45);
     n.visible = false;
@@ -271,7 +287,7 @@ export function buildFlyModel() {
     br.castShadow = false;
   }
 
-  return { root, legs, foldedWings, blurWingL: bl, blurWingR: br, abdomen };
+  return { root, legs, foldedWings, blurWingL: bl, blurWingR: br, abdomen, wingFlightSpread: 1.1 };
 }
 
 // MARK: - Behavior
@@ -279,6 +295,20 @@ export function buildFlyModel() {
 export class Fly {
   constructor(p) {
     this.model = buildFlyModel();
+    this.legDynamics = new SixLegDynamics(this.model.legs.map((leg) => leg.geometry));
+    const standing = this.legDynamics.feedback;
+    this.model.legs.forEach((leg, i) => leg.apply(standing[i]));
+    this.motorWalking = false;
+    this.renderedLegState = null;
+    this.renderedMotorControl = false;
+    this.legBlendFrom = [];
+    this.legBlendTime = 0;
+    this.turnTarget = null;
+    this.turnTargetTime = 0;
+    this.turnVelocity = 0;
+    this.ledgeHeading = null;
+    this.wingFlightAmount = 0;
+    this.sensedLegFeedback = [];
 
     this.pos = { x: p.x, y: p.y };
     this.heading = rnd(0, 2 * Math.PI);
@@ -320,6 +350,8 @@ export class Fly {
   }
 
   get node() { return this.model.root; }
+  get legFeedback() { return this.sensedLegFeedback.length === this.model.legs.length
+    ? this.sensedLegFeedback : this.legDynamics.feedback; }
   get gaitPhasePublic() { return this.gaitPhase; }
   get walkingIntensity() {
     return this.state === 'walking'
@@ -350,12 +382,12 @@ export class Fly {
   }
 
   startFlight(bounds, { awayFrom = null, escape = false, effort = null, target: forced = null } = {}) {
-    this.state = 'flying';
+    this.setState('flying');
     this.ledge = null;
+    this.ledgeHeading = null;
+    this.turnTarget = null;
     this.flightEffort = clampf(effort !== null ? effort : (escape ? 1.0 : rnd(0.4, 0.75)), 0.25, 1);
     this.effortCurrent = this.flightEffort;
-    this.flapPhase = 0;
-    this.wingRaise = 0;
     this.flightFrom = { x: this.pos.x, y: this.pos.y };
     const hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN;
     let target = { x: 0, y: 0 };
@@ -399,26 +431,18 @@ export class Fly {
   }
 
   land() {
-    this.state = 'idle';
+    this.setState('idle');
     this.stateTimer = rnd(0.3, 0.8);
     this.speed = 0;
     this.alt = 0;
     this.pitch = 0;
     this.node.scale.set(FLY_SCALE, FLY_SCALE, FLY_SCALE);
     this.node.position.z = 0;
-    // refold the wings flat over the abdomen
-    this.model.foldedWings.children.forEach((wing, i) => {
-      const side = i === 0 ? -1 : 1;
-      wing.rotation.set(0, 0, side * 0.13);
-    });
-    this.model.blurWingL.visible = false;
-    this.model.blurWingR.visible = false;
+    // Wing closure and leg settling continue from their airborne poses.
   }
 
-  // Queue a body saccade instead of snapping the heading. Escape turns do NOT
-  // go through this: a fleeing fly extends its legs in 3.33 ms (Card &
-  // Dickinson 2008, J Exp Biol 211:341, 10.1242/jeb.012682) and must stay
-  // instant.
+  // Queue a small spontaneous body saccade. Larger direction changes use
+  // turnToward so fast reactions do not rotate the entire animal in one tick.
   startSaccade() {
     this.saccade = (rnd(0, 1) < 0.5 ? -1 : 1) * rnd(SACCADE_MIN, SACCADE_MAX);
     this.saccadeRate = this.saccade / SACCADE_DUR;
@@ -434,6 +458,22 @@ export class Fly {
       this.heading += step;
       this.saccade -= step;
     }
+  }
+
+  turnToward(target, dt) {
+    const error = angleDiff(this.heading, target);
+    const desired = clampf(error * 16, -8, 8);
+    this.turnVelocity += clampf(desired - this.turnVelocity, -60 * dt, 60 * dt);
+    const step = this.turnVelocity * dt;
+    if (step * error >= 0 && Math.abs(step) >= Math.abs(error)) {
+      this.heading += error;
+      this.turnVelocity = 0;
+    } else this.heading += step;
+  }
+
+  prepareMotorControl(tempo) {
+    if (!this.motorWalking) this.legDynamics.adoptPose(this.legFeedback, true, 1 / tempo);
+    this.motorWalking = true;
   }
 
   pickNextState() {
@@ -472,19 +512,35 @@ export class Fly {
 
     this.stateAge += dt;
     this.dartTimer = Math.max(0, this.dartTimer - dt);
+    this.turnTargetTime = Math.max(0, this.turnTargetTime - dt);
+    if (this.turnTargetTime === 0) this.turnTarget = null;
 
     // live brain drives reach the wings even mid-flight
     this.brainLive = !!signals;
     this.liveArousal = signals ? signals.arousal : 0;
     this.liveWing = signals ? signals.wingDrive : 0;
+    const tempo = signals?.tempo ?? 1;
+    const motorTempo = Number.isFinite(tempo) ? clampf(tempo, 0.5, 2) : 1;
+    const motorDT = dt * motorTempo;
 
     if (this.state === 'flying') {
       this.saccade = 0;            // airborne heading is geometric, not a walk saccade
       this.updateFlight(dt);
     } else if (signals) {
-      this.stepSaccade(dt);
+      if (!signals.legCommands) this.stepSaccade(dt);
       this.brainBehavior(signals, dt, bounds, mouse);
-      if (this.state === 'walking') this.updateWalk(dt, bounds);
+      if (this.state === 'walking') {
+        if (signals.legCommands && signals.legCommands.length === this.model.legs.length) {
+          this.prepareMotorControl(motorTempo);
+          this.saccade = 0;
+          const motion = this.legDynamics.advance(signals.legCommands, motorDT);
+          this.speed = Math.abs(motion.forward) / Math.max(0.001, dt);
+          this.updateWalk(dt, bounds, motion);
+        } else {
+          this.motorWalking = false;
+          this.updateWalk(dt, bounds);
+        }
+      }
     } else {
       if (this.scareCooldown === 0 && mouse) {
         // legacy distance-based fear (extra, brainless flies)
@@ -493,10 +549,11 @@ export class Fly {
           this.startFlight(bounds, { awayFrom: mouse });
         } else if (mouseDist < NERVOUS_RADIUS && this.state !== 'walking') {
           this.setState('walking');
-          this.saccade = 0;        // fleeing turns are instant, not saccadic
-          this.heading = Math.atan2(this.pos.y - mouse.y, this.pos.x - mouse.x) + rnd(-0.4, 0.4);
+          this.saccade = 0;
+          this.turnTarget = Math.atan2(this.pos.y - mouse.y, this.pos.x - mouse.x) + rnd(-0.4, 0.4);
           this.speed = rnd(110, 150);
           this.stateTimer = rnd(0.4, 0.9);
+          this.turnTargetTime = this.stateTimer;
           this.scareCooldown = 1.0;
         }
       }
@@ -511,7 +568,17 @@ export class Fly {
       }
     }
 
+    if (signals?.legCommands?.length !== this.model.legs.length
+      || !['walking', 'idle', 'sleeping'].includes(this.state)) this.motorWalking = false;
+    if (signals?.legCommands?.length === this.model.legs.length && ['idle', 'sleeping'].includes(this.state)) {
+      this.prepareMotorControl(motorTempo);
+      this.legDynamics.advance(Array.from({ length: 6 }, () => ({ protract: 0, retract: 0,
+        lift: 0, depress: 0, flex: 0, extend: 0 })), motorDT);
+      this.motorWalking = true;
+    }
+    if (!this.motorWalking) this.legDynamics.resetContact(this.state !== 'flying');
     this.updateLegs(dt);
+    this.sampleLegFeedback(dt);
     this.updateWings(dt);
     // slower, deeper breathing while asleep
     const breathe = this.state === 'sleeping'
@@ -525,6 +592,7 @@ export class Fly {
     if (s === this.state) return;
     this.state = s;
     this.stateAge = 0;
+    if (s !== 'walking') this.turnTarget = null;
   }
 
   // Every behavioral decision here reads a real neuron population's rate.
@@ -549,11 +617,12 @@ export class Fly {
       this.ledge = null;
       this.setState('walking');
       if (mouse) {
-        this.saccade = 0;        // fleeing turns are instant, not saccadic
-        this.heading = Math.atan2(this.pos.y - mouse.y, this.pos.x - mouse.x) + rnd(-0.4, 0.4);
+        this.saccade = 0;
+        this.turnTarget = Math.atan2(this.pos.y - mouse.y, this.pos.x - mouse.x) + rnd(-0.4, 0.4);
       } else { this.startSaccade(); }
       this.speed = rnd(110, 155);
       this.dartTimer = rnd(0.4, 0.9);
+      this.turnTargetTime = this.dartTimer;
       this.dartCooldown = 1.2;
     }
     // DNg11 (grooming command) hysteresis
@@ -580,11 +649,11 @@ export class Fly {
     }
     // walking speed follows the forward command rate; tempo = temperature
     if (this.state === 'walking') {
-      if (this.dartTimer === 0 && this.backwardTimer === 0) {
+      if (!s.legCommands && this.dartTimer === 0 && this.backwardTimer === 0) {
         const target = (14 + s.walkDrive * 55) * s.tempo;
         this.speed += (target - this.speed) * lag(3, dt);
       }
-      if (!this.ledge) this.heading += s.turnBias * dt;   // DNa01/DNa02 steering
+      if (!s.legCommands && !this.ledge) this.heading += s.turnBias * dt;   // DNa01/DNa02 steering
     }
     // spontaneous takeoff, gated on whole-population arousal; flight
     // altitude/effort scales with how aroused the network is
@@ -594,11 +663,12 @@ export class Fly {
     }
   }
 
-  updateWalk(dt, bounds) {
+  updateWalk(dt, bounds, motorMotion = null) {
     // refresh the attached ledge from current terrain (windows move/close)
     if (this.ledge) {
       const cur = this.terrain.find((L) => L.id === this.ledge.id);
-      if (cur && Math.abs(cur.y - this.ledge.y) < 40) {
+      if (cur && Math.abs(cur.y - this.ledge.y) < 40
+        && this.pos.x >= cur.x0 - 6 && this.pos.x <= cur.x1 + 6) {
         this.ledge = cur;
       } else {
         this.ledge = null;
@@ -609,25 +679,34 @@ export class Fly {
     if (this.ledge) {
       const L = this.ledge;
       // walk along the window edge
-      this.heading += rnd(-1, 1) * LEDGE_JITTER * Math.sqrt(dt);
-      const along = Math.cos(this.heading) >= 0 ? 0 : Math.PI;
-      this.heading += angleDiff(this.heading, along) * lag(6, dt);
-      this.pos.x += Math.cos(this.heading) * this.effectiveSpeed * dt;
+      if (!motorMotion) this.heading += rnd(-1, 1) * LEDGE_JITTER * Math.sqrt(dt);
+      if (this.ledgeHeading === null) this.ledgeHeading = Math.cos(this.heading) >= 0 ? 0 : Math.PI;
+      if (this.pos.x <= L.x0 + 6) this.ledgeHeading = 0;
+      if (this.pos.x >= L.x1 - 6) this.ledgeHeading = Math.PI;
+      this.turnToward(this.ledgeHeading, dt);
+      this.pos.x += Math.cos(this.heading) * (motorMotion ? motorMotion.forward : this.effectiveSpeed * dt);
       this.pos.y += (L.y - this.pos.y) * lag(10, dt);
-      if (this.pos.x <= L.x0 + 6 && Math.cos(this.heading) < 0) this.heading = 0;
-      if (this.pos.x >= L.x1 - 6 && Math.cos(this.heading) > 0) this.heading = Math.PI;
       this.pos.x = clampf(this.pos.x, L.x0, L.x1);
       if (rnd(0, 1) < lag(0.05, dt)) this.ledge = null;   // wander off the edge
     } else {
-      this.heading += rnd(-1, 1) * WANDER_JITTER * Math.sqrt(dt);
+      this.ledgeHeading = null;
+      if (this.turnTarget !== null) {
+        this.turnToward(this.turnTarget, dt);
+        if (Math.abs(angleDiff(this.heading, this.turnTarget)) < 0.001) this.turnTarget = null;
+      }
+      const motionHeading = this.heading;
+      if (motorMotion) this.heading += motorMotion.yaw;
+      else this.heading += rnd(-1, 1) * WANDER_JITTER * Math.sqrt(dt);
       const hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN;
       if (Math.abs(this.pos.x) > hw || Math.abs(this.pos.y) > hh) {
         const toCenter = Math.atan2(-this.pos.y, -this.pos.x);
         this.heading += angleDiff(this.heading, toCenter) * lag(4, dt);
       }
-      const v = this.effectiveSpeed;
-      this.pos.x += Math.cos(this.heading) * v * dt;
-      this.pos.y += Math.sin(this.heading) * v * dt;
+      const forward = motorMotion ? motorMotion.forward : this.effectiveSpeed * dt;
+      const lateral = motorMotion ? motorMotion.lateral : 0;
+      const translationHeading = motorMotion ? motionHeading : this.heading;
+      this.pos.x += Math.cos(translationHeading) * forward + Math.sin(translationHeading) * lateral;
+      this.pos.y += Math.sin(translationHeading) * forward - Math.cos(translationHeading) * lateral;
       this.pos.x = clampf(this.pos.x, -bounds.width / 2 + EDGE_CLAMP, bounds.width / 2 - EDGE_CLAMP);
       this.pos.y = clampf(this.pos.y, -bounds.height / 2 + EDGE_CLAMP, bounds.height / 2 - EDGE_CLAMP);
       // walked off the edge of a monitor into unlit space: steer back
@@ -641,13 +720,13 @@ export class Fly {
         if (this.pos.x > L.x0 - 8 && this.pos.x < L.x1 + 8 && Math.abs(this.pos.y - L.y) < 20) {
           if (rnd(0, 1) < lag(0.9, dt)) {
             this.ledge = L;
-            this.heading = Math.cos(this.heading) >= 0 ? 0 : Math.PI;
+            this.ledgeHeading = Math.cos(this.heading) >= 0 ? 0 : Math.PI;
             break;
           }
         }
       }
     }
-    this.node.position.z = 0.35 * Math.abs(Math.sin(this.gaitPhase * Math.PI * 2));
+    this.node.position.z = motorMotion ? 0 : 0.35 * Math.abs(Math.sin(this.gaitPhase * Math.PI * 2));
   }
 
   applyAltitude() {
@@ -661,12 +740,13 @@ export class Fly {
     if (this.flightT >= 1) {
       // touchdown flare: the timer ended, but the fly lands only when it
       // has actually descended — hover over the target and settle down.
-      this.pos.x = this.flightTo.x + Math.sin(this.time * 26) * 1.2;
-      this.pos.y = this.flightTo.y + Math.cos(this.time * 22) * 1.0;
-      this.pitch = clampf(this.alt * 0.4, 0, 0.35);   // gentle nose-up flare
+      const settle = Math.min(1, this.alt / 0.2);
+      this.pos.x = this.flightTo.x + Math.sin(this.time * 26) * 1.2 * settle;
+      this.pos.y = this.flightTo.y + Math.cos(this.time * 22) * settle;
+      this.pitch += (clampf(this.alt * 0.4, 0, 0.35) - this.pitch) * lag(12, dt);
       this.alt += (0 - this.alt) * lag(9, dt);
       this.applyAltitude();
-      if (this.alt < 0.035) { this.pos = { x: this.flightTo.x, y: this.flightTo.y }; this.land(); }
+      if (this.alt < 0.003) { this.pos = { x: this.flightTo.x, y: this.flightTo.y }; this.land(); }
       return;
     }
     const e = smoothstep(this.flightT);
@@ -676,7 +756,7 @@ export class Fly {
     const wob = Math.sin(this.time * 32) * 4 * Math.sin(this.flightT * Math.PI);
     this.pos.x = this.flightFrom.x + dx * e + px * wob;
     this.pos.y = this.flightFrom.y + dy * e + py * wob;
-    this.heading = Math.atan2(dy, dx) + Math.sin(this.time * 18) * 0.12;
+    this.turnToward(Math.atan2(dy, dx) + Math.sin(this.time * 18) * 0.12, dt);
     // altitude: climb, effort-scaled cruise with buzz-wobble, descend to land.
     // Effort stays live: ongoing escape-DN (DNp02/04/11) and arousal activity
     // pushes the fly to beat harder and fly higher mid-flight.
@@ -688,89 +768,120 @@ export class Fly {
     const riseEnv = Math.min(this.flightT / 0.25, 1);
     const fallEnv = Math.min((1 - this.flightT) / 0.3, 1);
     const target = this.effortCurrent * Math.min(riseEnv, fallEnv) * (0.85 + 0.15 * Math.sin(this.time * 7));
-    this.pitch = clampf((target - this.alt) * 2.5, -0.45, 0.45);   // nose up while climbing
+    this.pitch += (clampf((target - this.alt) * 2.5, -0.45, 0.45) - this.pitch) * lag(12, dt);
     this.alt += (target - this.alt) * lag(6, dt);
     // higher = closer to the viewer = bigger, and the shadow slides away
     this.applyAltitude();
   }
 
   updateLegs(dt) {
-    const v = Math.abs(this.effectiveSpeed);
-    const walking = (this.state === 'walking' && v > 1);
-    if (walking) {
-      const amp = clampf(0.20 + v * 0.0022, 0.20, 0.50);
-      const stride = Math.max(5, 2 * amp * 13);
-      const freq = clampf(v / stride, 3, 11);
-      this.gaitPhase = (this.gaitPhase + freq * dt) % 1;
-      // Swing lasts a near-constant ~35 ms whatever the speed; it is stance
-      // that shortens as the fly speeds up. A fixed fraction did the opposite.
-      const stanceFrac = clampf(1 - SWING_DUR * freq, 0.35, 0.9);
-      for (const leg of this.model.legs) {
-        const p = (this.gaitPhase + leg.phase) % 1;
-        if (p < stanceFrac) {
-          leg.angle = amp * (1 - 2 * (p / stanceFrac));
-          leg.lift = 0;
-        } else {
-          const s = (p - stanceFrac) / (1 - stanceFrac);
-          leg.angle = -amp + 2 * amp * smoothstep(s);
-          leg.lift = Math.sin(s * Math.PI) * 0.55;
-        }
-        if (this.backwardTimer > 0) leg.angle = -leg.angle;
-        leg.apply();
-      }
-    } else if (this.state === 'grooming') {
-      for (const leg of this.model.legs) {
-        if (leg.isFront) {
-          leg.angle = 0.45 + 0.25 * Math.sin(this.time * 20 + leg.swingSign * 1.3);
-          leg.lift = 0.55 + 0.15 * Math.sin(this.time * 22);
-        } else {
-          leg.angle += (0 - leg.angle) * lag(8, dt);
-          leg.lift += (0 - leg.lift) * lag(8, dt);
-        }
-        leg.apply();
-      }
-    } else if (this.state === 'flying') {
-      for (const leg of this.model.legs) {
-        leg.angle += (-0.35 - leg.angle) * lag(6, dt);
-        leg.lift += (0.5 - leg.lift) * lag(6, dt);
-        leg.apply();
-      }
-    } else {
-      for (const leg of this.model.legs) {
-        leg.angle += (0 - leg.angle) * lag(10, dt);
-        leg.lift += (0 - leg.lift) * lag(10, dt);
-        leg.apply();
-      }
+    if (this.motorWalking) {
+      const feedback = this.legDynamics.feedback;
+      this.model.legs.forEach((leg, i) => leg.apply(feedback[i]));
+      this.renderedLegState = this.state;
+      this.renderedMotorControl = true;
+      return;
     }
+    // Retarget from the displayed pose, including an interrupted transition.
+    // Motor control instead adopts that pose in the physical controller.
+    if (this.renderedLegState !== this.state || this.renderedMotorControl) {
+      this.legBlendFrom = this.model.legs.map((leg) => ({
+        hipAngle: leg.angle, elevationAngle: leg.lift, kneeAngle: leg.kneeAngle }));
+      this.legBlendTime = 0;
+    }
+    this.renderedLegState = this.state;
+    this.renderedMotorControl = false;
+    this.legBlendTime = Math.min(0.18, this.legBlendTime + dt);
+    const blend = smoothstep(this.legBlendTime / 0.18);
+    const v = Math.abs(this.effectiveSpeed);
+    const walking = this.state === 'walking' && v > 1;
+    const amp = clampf(0.20 + v * 0.0022, 0.20, 0.50);
+    const freq = clampf(v / Math.max(5, 2 * amp * 13), 3, 11);
+    if (walking) this.gaitPhase = (this.gaitPhase + freq * dt) % 1;
+    const stanceFrac = clampf(1 - SWING_DUR * freq, 0.35, 0.9);
+    this.model.legs.forEach((leg, i) => {
+      let angle = 0, lift = 0, knee = 0.95;
+      if (walking) {
+        knee = 0.75;
+        const p = (this.gaitPhase + leg.phase) % 1;
+        if (p < stanceFrac) angle = amp * (1 - 2 * p / stanceFrac);
+        else {
+          const phase = (p - stanceFrac) / (1 - stanceFrac);
+          angle = -amp + 2 * amp * smoothstep(phase);
+          lift = Math.sin(phase * Math.PI) * 0.55;
+        }
+        if (this.backwardTimer > 0) angle = -angle;
+      } else if (this.state === 'grooming') {
+        knee = 0.75;
+        if (leg.isFront) {
+          angle = 0.45 + 0.25 * Math.sin(this.time * 20 + leg.swingSign * 1.3);
+          lift = 0.55 + 0.15 * Math.sin(this.time * 22);
+        }
+      } else if (this.state === 'flying') {
+        angle = -0.35; lift = 0.5; knee = 0.75;
+      }
+      angle = clampf(angle, -LegDynamics.hipLimit, LegDynamics.hipLimit);
+      lift = clampf(lift, ...LegDynamics.elevationRange);
+      if (this.state !== 'flying') lift = Math.max(lift, LegDynamics.groundElevation(leg.geometry, knee));
+      const from = this.legBlendFrom[i];
+      leg.angle = from.hipAngle + (angle - from.hipAngle) * blend;
+      leg.kneeAngle = from.kneeAngle + (knee - from.kneeAngle) * blend;
+      leg.lift = from.elevationAngle + (lift - from.elevationAngle) * blend;
+      // Ground clearance uses the interpolated knee, so the next motor handoff
+      // needs no projection of the displayed toe position.
+      if (this.state !== 'flying') {
+        leg.lift = Math.max(leg.lift, LegDynamics.groundElevation(leg.geometry, leg.kneeAngle));
+      }
+      leg.apply();
+    });
+  }
+
+  sampleLegFeedback(dt) {
+    const previous = this.legFeedback;
+    this.node.updateMatrixWorld(true);
+    this.sensedLegFeedback = this.model.legs.map((leg, i) => {
+      const toe = new THREE.Vector3(leg.geometry.tarsus, 0, 0);
+      leg.ankle.localToWorld(toe);
+      this.node.worldToLocal(toe);
+      const hipAngle = leg.angle, kneeAngle = leg.knee.rotation.y, elevationAngle = leg.lift;
+      const footHeight = toe.z + this.node.position.z;
+      return { hipAngle, kneeAngle, elevationAngle,
+        hipVelocity: (hipAngle - previous[i].hipAngle) / Math.max(0.001, dt),
+        kneeVelocity: (kneeAngle - previous[i].kneeAngle) / Math.max(0.001, dt),
+        elevationVelocity: (elevationAngle - previous[i].elevationAngle) / Math.max(0.001, dt),
+        footX: toe.x, footY: toe.y, footHeight,
+        contact: this.state !== 'flying' && footHeight <= 0.015, load: 0 };
+    });
+    const supports = Math.max(1, this.sensedLegFeedback.filter((f) => f.contact).length);
+    const physical = this.legDynamics.feedback;
+    this.sensedLegFeedback.forEach((f, i) => {
+      f.load = f.contact ? (this.motorWalking ? physical[i].load : 1 / supports) : 0;
+    });
   }
 
   updateWings(dt) {
-    if (this.state !== 'flying') {
-      // grounded threat posture: escape-DN / loom activity raises the wings
-      if (this.model.foldedWings.visible) {
-        const raiseTarget = (this.state !== 'sleeping'
-          && (this.liveWing > 0.7 || (this.brainLive && this.dartTimer > 0))) ? 1 : 0;
-        this.wingRaise += (raiseTarget - this.wingRaise) * lag(8, dt);
-        if (this.wingRaise > 0.01) {
-          this.model.foldedWings.children.forEach((wing, i) => {
-            const side = i === 0 ? -1 : 1;
-            wing.rotation.set(-0.5 * this.wingRaise, 0, side * (0.13 + 0.3 * this.wingRaise));
-          });
-        }
-      }
-      return;
-    }
-    // visible wing-beat: the wing shapes sweep through a stroke arc,
-    // faster when the live effort is higher
-    this.flapPhase = (this.flapPhase + dt * (14 + 10 * this.effortCurrent)) % 1;
+    const flying = this.state === 'flying';
+    this.wingFlightAmount += ((flying ? 1 : 0) - this.wingFlightAmount) * lag(18, dt);
+    if (!flying && this.wingFlightAmount < 0.0001) this.wingFlightAmount = 0;
+    const raiseTarget = !flying && this.state !== 'sleeping'
+      && (this.liveWing > 0.7 || (this.brainLive && this.dartTimer > 0)) ? 1 : 0;
+    this.wingRaise += (raiseTarget - this.wingRaise) * lag(8, dt);
+    if (flying || this.wingFlightAmount > 0) this.flapPhase += dt * (22 + 10 * this.effortCurrent);
     const stroke = Math.sin(this.flapPhase * 2 * Math.PI);
+    // Spread before permitting a downstroke, and flatten before folding.
+    const beat = smoothstep((this.wingFlightAmount - 0.8) / 0.2);
     this.model.foldedWings.children.forEach((wing, i) => {
       const side = i === 0 ? -1 : 1;
-      wing.rotation.set(stroke * 0.35, 0, side * (0.45 + 0.35 * (0.5 + 0.5 * stroke)));
+      const groundedSpread = 0.13 + 0.3 * this.wingRaise;
+      const spread = groundedSpread + (this.model.wingFlightSpread - groundedSpread) * this.wingFlightAmount;
+      wing.rotation.set(-0.5 * this.wingRaise * (1 - this.wingFlightAmount) + stroke * 0.35 * beat,
+        0, side * (spread + 0.175 * stroke * beat));
     });
-    const flick = 0.10 + 0.14 * Math.abs(stroke);
+    const flick = (0.10 + 0.14 * Math.abs(stroke)) * this.wingFlightAmount;
     this.model.blurWingL.material.opacity = flick;
     this.model.blurWingR.material.opacity = flick;
+    this.model.blurWingL.visible = this.wingFlightAmount !== 0;
+    this.model.blurWingR.visible = this.wingFlightAmount !== 0;
     this.model.blurWingL.rotation.set(0, 0, 0.45 + stroke * 0.2);
     this.model.blurWingR.rotation.set(0, 0, -0.45 - stroke * 0.2);
   }

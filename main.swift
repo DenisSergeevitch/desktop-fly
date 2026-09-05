@@ -80,11 +80,25 @@ func offscreenRender(_ scene: SCNScene, camNode: SCNNode, size: CGSize, path: St
 /// `topDown: true` reproduces the desktop overlay's own view — orthographic,
 /// straight down, same key light. That is the only view users actually see, so
 /// it is the one to check body geometry against.
-func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false) {
+func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false, walking: Bool = false) {
     let scene = SCNScene()
     scene.background.contents = NSColor(calibratedWhite: 0.94, alpha: 1)
     let fly = Fly(at: .zero)
     fly.heading = .pi / 2
+    if walking {
+        guard let data = loadBrainData() else { fputs("missing/invalid brain data\n", stderr); exit(1) }
+        let sim = LIFSim(circuit: data.circuit, spikeBus: nil, locomotorCircuit: data.locomotor)
+        let builder = SignalBuilder()
+        sim.stimulate(sim.fwd, strength: 0.15, durationMs: 3000)
+        for frame in 0..<300 {
+            sim.legFeedback = fly.legFeedback
+            sim.step(frame % 3 == 2 ? 9 : 8)
+            var signals = builder.make(sim, dt: SimulationClock.tick)
+            signals.escape = false; signals.groomDrive = 0; signals.nervous = 0; signals.arousal = 0
+            fly.update(dt: SimulationClock.tick, bounds: CGSize(width: 1400, height: 1400), mouse: nil, signals: signals)
+        }
+        fly.pos = .zero; fly.heading = .pi / 2
+    }
     if flying {
         fly.state = .idle
         fly.startFlight(bounds: CGSize(width: 1400, height: 1400), effort: 0.9)
@@ -95,7 +109,7 @@ func runSnapshot(path: String, topDown: Bool = false, flying: Bool = false) {
         fly.pos = .zero
         fly.heading = .pi / 2
     }
-    for (i, leg) in fly.model.legs.enumerated() {
+    for (i, leg) in fly.model.legs.enumerated() where !walking {
         leg.angle = [0.25, -0.2, -0.22, 0.28, 0.2, -0.25][i]
         leg.lift = [0.35, 0, 0, 0.3, 0, 0.35][i]
         leg.apply()
@@ -145,6 +159,8 @@ func runBrainshot(path: String) {
 }
 
 func runSimtest() {
+    let seed = TestRandom.reset()
+    print("test RNG: desktop-fly-tests, seed 0x\(String(seed, radix: 16))")
     guard let data = loadBrainData() else { fputs("no data/ — run etl.py first\n", stderr); exit(1) }
     let sim = LIFSim(circuit: data.circuit, spikeBus: nil)
     print("circuit: \(sim.n) neurons | loom L/R: \(sim.loomLeft.count)/\(sim.loomRight.count)"
@@ -251,6 +267,7 @@ func runSimtest() {
 // MARK: - Behavior test (headless sim -> 3D body end-to-end)
 
 func runBehaviorTest() {
+    print("test RNG: FNV-1a(test name), LCG32")
     guard let data = loadBrainData() else { fputs("no data/ — run etl.py first\n", stderr); exit(1) }
     let bounds = CGSize(width: 1512, height: 982)
     let dt: CGFloat = 1.0 / 60.0
@@ -258,7 +275,9 @@ func runBehaviorTest() {
 
     func scenario(_ name: String, stim: (LIFSim) -> Void, hold: CGFloat,
                   setup: ((Fly) -> Void)? = nil,
+                  filterSignals: ((inout BrainSignals) -> Void)? = nil,
                   check: (Fly) -> Bool, describe: (Fly) -> String) {
+        TestRandom.reset(name)
         let sim = LIFSim(circuit: data.circuit, spikeBus: nil)
         let builder = SignalBuilder()
         let fly = Fly(at: .zero)
@@ -274,7 +293,8 @@ func runBehaviorTest() {
         while frames > 0 {
             frames -= 1
             sim.step(Int((dt * 1000).rounded()))
-            let s = builder.make(sim, dt: dt)
+            var s = builder.make(sim, dt: dt)
+            filterSignals?(&s)
             fly.update(dt: dt, bounds: bounds, mouse: nil, signals: s)
             if check(fly) { passed = true; break }
         }
@@ -294,6 +314,10 @@ func runBehaviorTest() {
 
     scenario("DNp09 stim -> walks, speed rises (capped)",
              stim: { $0.stimulate($0.fwd, strength: 0.25, durationMs: 1200) }, hold: 1.5,
+             // Background DNg11 can win the idle-state transition and consume
+             // this stimulus window grooming. Isolate the forward response;
+             // DNg11's independent grooming response is checked just above.
+             filterSignals: { $0.groomDrive = 0 },
              check: { $0.state == .walking && $0.speed > 40 && $0.speed < 100 },
              describe: { "state=\($0.state) speed=\(Int($0.speed))" })
 
@@ -328,6 +352,7 @@ func runBehaviorTest() {
 
     // ---- body-level environment checks (hand-built signals, no sim) ----
     func bodyCheck(_ name: String, _ run: () -> (Bool, String)) {
+        TestRandom.reset(name)
         let (ok, detail) = run()
         if !ok { failures += 1 }
         print("\(ok ? "PASS" : "FAIL")  \(name): \(detail)")
@@ -423,7 +448,7 @@ func runBehaviorTest() {
         let fly = Fly(at: .zero)
         fly.state = .idle
         fly.startFlight(bounds: bounds, effort: 0.5)
-        var calm = BrainSignals()
+        let calm = BrainSignals()
         for _ in 0..<12 { fly.update(dt: dt, bounds: bounds, mouse: nil, signals: calm) }
         let calmEffort = fly.effortCurrent
         var hot = BrainSignals(); hot.wingDrive = 1.0; hot.arousal = 0.6
@@ -647,6 +672,7 @@ final class SignalBuilder {
         s.groomDrive = CGFloat(sim.rateGroom) / 8
         s.wingDrive = clampf(CGFloat(sim.rateEscW) / 10, 0, 1.3)
         s.arousal = clampf(CGFloat(sim.ratePop) / 20, 0, 1)
+        s.legCommands = sim.locomotor?.commands
         return s
     }
 }
@@ -668,6 +694,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var fpsWindowStart: TimeInterval = 0
     private let signalBuilder = SignalBuilder()
     private var msAccumulator: Double = 0
+    private let simulationClock = SimulationClock()
     private var prevMouse: CGPoint?
     private var mouseVel = CGPoint.zero
     private var mouseVelRaw = CGPoint.zero   // last measurement, held between samples
@@ -844,6 +871,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let dt = CGFloat(min(0.05, max(0, t - last)))
         lastTime = t
 
+        simulationClock.advance(dt) { self.advanceSimulation(dt: $0, mouse: mouse) }
+    }
+
+    private func advanceSimulation(dt: CGFloat, mouse: CGPoint?) {
         var signals: BrainSignals? = nil
         if let sim = sim, let first = flies.first {
             let sensory = computeLoom(fly: first, mouse: mouse, dt: dt)
@@ -856,6 +887,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             // body -> brain: leg proprioception from the current gait
             sim.gaitDrive = Float(first.walkingIntensity)
             sim.gaitPhase = Float(first.gaitPhasePublic)
+            sim.legFeedback = first.legFeedback
             // circadian + sleep neuromodulation. Compressed: the LIF neurons sit
             // just below threshold, so a raw multiplier silences them entirely —
             // siesta should mean "less active", not comatose.
@@ -863,7 +895,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
             sim.sensoryGate = sleepy ? 0.55 : 1
             loomOverride = max(0, loomOverride - dt * 1.2)   // override decays
             msAccumulator += Double(dt) * 1000
-            let steps = min(50, Int(msAccumulator))
+            let steps = min(50, Int(msAccumulator + 1e-6))
             msAccumulator -= Double(steps)
             sim.step(steps)
 
@@ -919,9 +951,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let spikeBus = SpikeBus()
         var brainPoints: BrainPointsFile? = nil
         if let data = loadBrainData() {
-            sim = LIFSim(circuit: data.circuit, spikeBus: spikeBus)
+            sim = LIFSim(circuit: data.circuit, spikeBus: spikeBus, locomotorCircuit: data.locomotor)
             brainPoints = data.points
             dataInfo = "FlyWire v783 · \(data.points.points.count) somas · circuit \(data.circuit.neurons.count)n/\(data.circuit.edges.count)e"
+                + " · MaleCNS \(data.locomotor.neurons.count)n/\(data.locomotor.edges.count)e"
         }
 
         coordinator = Coordinator(bounds: frame.size, sim: sim)
@@ -1110,7 +1143,7 @@ let args = CommandLine.arguments
 if let i = args.firstIndex(of: "--snapshot") {
     if args.contains("--beetle") { BODY_FORM = .beetle }
     runSnapshot(path: args.count > i + 1 ? args[i + 1] : "preview.png",
-                topDown: args.contains("--top"), flying: args.contains("--flying"))
+                topDown: args.contains("--top"), flying: args.contains("--flying"), walking: args.contains("--walking"))
     exit(0)
 }
 if let i = args.firstIndex(of: "--brainshot") {
@@ -1122,6 +1155,9 @@ if args.contains("--simtest") {
 }
 if args.contains("--behaviortest") {
     runBehaviorTest()
+}
+if args.contains("--locomotortest") {
+    exit(runLocomotorTests() ? 0 : 1)
 }
 
 let app = NSApplication.shared

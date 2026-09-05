@@ -4,6 +4,7 @@
 
 import Cocoa
 import SceneKit
+import simd
 
 let SHADOWS_ENABLED = true
 let FLY_SCALE: CGFloat = 1.15
@@ -59,7 +60,7 @@ func buildBody() -> FlyModel {
     }
 }
 
-func rnd(_ range: ClosedRange<CGFloat>) -> CGFloat { CGFloat.random(in: range) }
+func rnd(_ range: ClosedRange<CGFloat>) -> CGFloat { TestRandom.cgFloat(in: range) }
 /// Frame-rate-independent form of the `min(1, k * dt)` idiom used throughout this
 /// file, for both first-order lags and per-frame event probabilities.
 ///
@@ -126,20 +127,38 @@ func abdomenTexture() -> NSImage {
 
 final class Leg {
     let root: SCNNode
+    let knee: SCNNode
+    let ankle: SCNNode
+    let geometry: LegGeometry
     let baseYaw: CGFloat
     let swingSign: CGFloat
     let phase: CGFloat
     let isFront: Bool
     var angle: CGFloat = 0
     var lift: CGFloat = 0
+    var kneeAngle: CGFloat = 0.75
 
-    init(root: SCNNode, baseYaw: CGFloat, swingSign: CGFloat, phase: CGFloat, isFront: Bool) {
+    init(root: SCNNode, knee: SCNNode, ankle: SCNNode, geometry: LegGeometry,
+         baseYaw: CGFloat, swingSign: CGFloat, phase: CGFloat, isFront: Bool) {
         self.root = root; self.baseYaw = baseYaw; self.swingSign = swingSign
         self.phase = phase; self.isFront = isFront
+        self.knee = knee; self.ankle = ankle; self.geometry = geometry
     }
 
     func apply() {
-        root.eulerAngles = SCNVector3(0, -lift, baseYaw + swingSign * angle)
+        // Every controller uses the same local joint axes. Changing behavior
+        // must not change the skeleton's rotation convention or reset a joint.
+        root.simdOrientation = simd_quatf(angle: Float(baseYaw + swingSign * angle), axis: SIMD3(0, 0, 1))
+            * simd_quatf(angle: Float(-lift), axis: SIMD3(0, 1, 0))
+        knee.eulerAngles = SCNVector3(0, kneeAngle, 0)
+        ankle.eulerAngles = SCNVector3(0, LegDynamics.ankleAngle, 0)
+    }
+
+    func apply(_ feedback: LegFeedback) {
+        angle = feedback.hipAngle
+        lift = feedback.elevationAngle
+        kneeAngle = feedback.kneeAngle
+        apply()
     }
 }
 
@@ -154,6 +173,8 @@ struct FlyModel {
     /// `updateWings` swings them open, nothing reads them back.
     var elytraL: SCNNode? = nil
     var elytraR: SCNNode? = nil
+    /// Body-specific wing clearance; the beetle retains its existing stroke.
+    var wingFlightSpread: CGFloat = 0.625
 }
 
 func buildLeg(attach: SCNVector3, baseYaw: CGFloat, swingSign: CGFloat, phase: CGFloat,
@@ -195,13 +216,19 @@ func buildLeg(attach: SCNVector3, baseYaw: CGFloat, swingSign: CGFloat, phase: C
     tarsusNode.position = SCNVector3(tarsus / 2, 0, 0)
     ankle.addChildNode(tarsusNode)
 
-    let leg = Leg(root: root, baseYaw: baseYaw, swingSign: swingSign, phase: phase, isFront: isFront)
+    let geometry = LegGeometry(attachX: CGFloat(attach.x), attachY: CGFloat(attach.y),
+        attachZ: CGFloat(attach.z), baseYaw: baseYaw, side: swingSign,
+        femur: femur, tibia: tibia, tarsus: tarsus)
+    let leg = Leg(root: root, knee: knee, ankle: ankle, geometry: geometry,
+                  baseYaw: baseYaw, swingSign: swingSign, phase: phase, isFront: isFront)
     leg.apply()
     return leg
 }
 
 func wingShape() -> SCNGeometry {
-    let path = NSBezierPath(ovalIn: NSRect(x: -2.6, y: -15.5, width: 5.2, height: 16.5))
+    // Put the hinge at the end of the membrane, so raising a wing cannot
+    // rotate a forward-projecting root through the thorax.
+    let path = NSBezierPath(ovalIn: NSRect(x: -2.6, y: -16.5, width: 5.2, height: 16.5))
     path.flatness = 0.1
     let shape = SCNShape(path: path, extrusionDepth: 0.12)
     let m = SCNMaterial()
@@ -293,7 +320,8 @@ func buildFlyModel() -> FlyModel {
     let foldedWings = SCNNode()
     for side in [CGFloat(-1), 1] {
         let wing = SCNNode(geometry: wingShape())
-        wing.position = SCNVector3(side * 1.6, 0.5, side > 0 ? 7.7 : 7.55)
+        // The folded membranes sit above the thorax and breathing abdomen.
+        wing.position = SCNVector3(side * 1.6, 0.5, side > 0 ? 10.4 : 10.25)
         wing.eulerAngles = SCNVector3(0, 0, side * 0.13)
         foldedWings.addChildNode(wing)
     }
@@ -307,7 +335,7 @@ func buildFlyModel() -> FlyModel {
         m.isDoubleSided = true
         g.materials = [m]
         let n = SCNNode(geometry: g)
-        n.position = SCNVector3(side * 6.0, 1.5, 8.2)
+        n.position = SCNVector3(side * 8.4, -2.8, 10.65)
         n.scale = SCNVector3(5.5, 2.4, 0.3)
         n.eulerAngles = SCNVector3(0, 0, side * -0.45)
         n.isHidden = true
@@ -318,7 +346,8 @@ func buildFlyModel() -> FlyModel {
     root.addChildNode(br)
 
     return FlyModel(root: root, legs: legs, foldedWings: foldedWings,
-                    blurWingL: bl, blurWingR: br, abdomen: abdomen)
+                    blurWingL: bl, blurWingR: br, abdomen: abdomen,
+                    wingFlightSpread: 1.1)
 }
 
 // MARK: - Behavior
@@ -328,6 +357,21 @@ final class Fly {
 
     var model: FlyModel
     var node: SCNNode { model.root }
+    private(set) var legDynamics: SixLegDynamics
+    private var sensedLegFeedback: [LegFeedback] = []
+    var legFeedback: [LegFeedback] {
+        sensedLegFeedback.count == model.legs.count ? sensedLegFeedback : legDynamics.feedback
+    }
+    private var motorWalking = false
+    private var renderedLegState: State?
+    private var renderedMotorControl = false
+    private var legBlendFrom: [LegFeedback] = []
+    private var legBlendTime: CGFloat = 0
+    private var turnTarget: CGFloat?
+    private var turnTargetTime: CGFloat = 0
+    private var turnVelocity: CGFloat = 0
+    private var ledgeHeading: CGFloat?
+    private var wingFlightAmount: CGFloat = 0
 
     var pos: CGPoint
     var heading: CGFloat = rnd(0...(2 * .pi))
@@ -369,6 +413,9 @@ final class Fly {
 
     init(at p: CGPoint) {
         model = buildBody()
+        legDynamics = SixLegDynamics(geometries: model.legs.map(\.geometry))
+        for (leg, pose) in zip(model.legs, legDynamics.feedback) { leg.apply(pose) }
+        sensedLegFeedback = []
         pos = p
         syncNode()
     }
@@ -380,6 +427,10 @@ final class Fly {
         let parent = old.parent
         old.removeFromParentNode()
         model = buildBody()
+        legDynamics = SixLegDynamics(geometries: model.legs.map(\.geometry))
+        for (leg, pose) in zip(model.legs, legDynamics.feedback) { leg.apply(pose) }
+        motorWalking = false; renderedLegState = nil; renderedMotorControl = false
+        sensedLegFeedback = []
         model.root.position = old.position
         model.root.scale = old.scale
         model.root.eulerAngles = old.eulerAngles
@@ -396,19 +447,19 @@ final class Fly {
 
     func startFlight(bounds: CGSize, awayFrom: CGPoint? = nil, escape: Bool = false,
                      effort: CGFloat? = nil) {
-        state = .flying
+        setState(.flying)
         ledge = nil
+        ledgeHeading = nil
+        turnTarget = nil
         flightEffort = clampf(effort ?? (escape ? 1.0 : rnd(0.4...0.75)), 0.25, 1)
         effortCurrent = flightEffort
-        flapPhase = 0
-        wingRaise = 0
         flightFrom = pos
         let hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN
         var target = CGPoint.zero
         var chosen = false
         // casual flights often land on a window edge
         if !escape, awayFrom == nil, !terrain.isEmpty, rnd(0...1) < 0.45 {
-            let L = terrain[Int.random(in: 0..<terrain.count)]
+            let L = terrain[TestRandom.integer(in: 0..<terrain.count)]
             if L.x1 - L.x0 > 90 {
                 target = CGPoint(x: rnd((L.x0 + 25)...(L.x1 - 25)), y: L.y)
                 chosen = hypot(target.x - pos.x, target.y - pos.y) > 180
@@ -439,25 +490,18 @@ final class Fly {
     }
 
     private func land() {
-        state = .idle
+        setState(.idle)
         stateTimer = rnd(0.3...0.8)
         speed = 0
         alt = 0
         pitch = 0
         node.scale = SCNVector3(FLY_SCALE, FLY_SCALE, FLY_SCALE)
         var p = node.position; p.z = 0; node.position = p
-        // refold the wings flat over the abdomen
-        for (i, wing) in model.foldedWings.childNodes.enumerated() {
-            let side: CGFloat = i == 0 ? -1 : 1
-            wing.eulerAngles = SCNVector3(0, 0, side * 0.13)
-        }
-        model.blurWingL.isHidden = true
-        model.blurWingR.isHidden = true
+        // Wing closure and leg settling continue from their airborne poses.
     }
 
-    /// Queue a body saccade instead of snapping the heading. Escape turns do NOT
-    /// go through this: a fleeing fly extends its legs in 3.33 ms (Card & Dickinson
-    /// 2008, J Exp Biol 211:341, 10.1242/jeb.012682) and must stay instant.
+    /// Queue a small spontaneous body saccade. Larger changes of direction use
+    /// turnToward so fast reactions do not rotate the entire animal in one tick.
     private func startSaccade() {
         saccade = (rnd(0...1) < 0.5 ? -1 : 1) * rnd(SACCADE_MIN...SACCADE_MAX)
         saccadeRate = saccade / SACCADE_DUR
@@ -473,6 +517,23 @@ final class Fly {
             heading += step
             saccade -= step
         }
+    }
+
+    private func turnToward(_ target: CGFloat, dt: CGFloat) {
+        let error = angleDiff(heading, target)
+        let desired = clampf(error * 16, -8, 8)
+        turnVelocity += clampf(desired - turnVelocity, -60 * dt, 60 * dt)
+        let step = turnVelocity * dt
+        if step * error >= 0 && abs(step) >= abs(error) {
+            heading += error; turnVelocity = 0
+        } else { heading += step }
+    }
+
+    private func prepareMotorControl(tempo: CGFloat) {
+        if !motorWalking {
+            legDynamics.adoptPose(legFeedback, grounded: true, velocityScale: 1 / tempo)
+        }
+        motorWalking = true
     }
 
     private func pickNextState() {
@@ -504,19 +565,37 @@ final class Fly {
 
         stateAge += dt
         dartTimer = max(0, dartTimer - dt)
+        turnTargetTime = max(0, turnTargetTime - dt)
+        if turnTargetTime == 0 { turnTarget = nil }
 
         // live brain drives reach the wings even mid-flight
         brainLive = signals != nil
         liveArousal = signals?.arousal ?? 0
         liveWing = signals?.wingDrive ?? 0
+        let tempo = signals?.tempo ?? 1
+        // Temperature changes elapsed mechanical time, so force integration,
+        // foot contact and the resulting sensory feedback all change together.
+        let motorTempo = tempo.isFinite ? clampf(tempo, 0.5, 2) : 1
+        let motorDT = dt * motorTempo
 
         if state == .flying {
             saccade = 0            // airborne heading is geometric, not a walk saccade
             updateFlight(dt: dt)
         } else if let s = signals {
-            stepSaccade(dt)
+            if s.legCommands == nil { stepSaccade(dt) }
             brainBehavior(s, dt: dt, bounds: bounds, mouse: mouse)
-            if state == .walking { updateWalk(dt: dt, bounds: bounds) }
+            if state == .walking {
+                if let commands = s.legCommands, commands.count == model.legs.count {
+                    prepareMotorControl(tempo: motorTempo)
+                    saccade = 0
+                    let motion = legDynamics.advance(commands: commands, dt: motorDT)
+                    speed = abs(motion.forward) / max(0.001, dt)
+                    updateWalk(dt: dt, bounds: bounds, motorMotion: motion)
+                } else {
+                    motorWalking = false
+                    updateWalk(dt: dt, bounds: bounds)
+                }
+            }
         } else {
             if scareCooldown == 0, let m = mouse {
                 // legacy distance-based fear (extra, brainless flies)
@@ -525,10 +604,11 @@ final class Fly {
                     startFlight(bounds: bounds, awayFrom: m)
                 } else if mouseDist < NERVOUS_RADIUS && state != .walking {
                     setState(.walking)
-                    saccade = 0        // fleeing turns are instant, not saccadic
-                    heading = atan2(pos.y - m.y, pos.x - m.x) + rnd(-0.4...0.4)
+                    saccade = 0
+                    turnTarget = atan2(pos.y - m.y, pos.x - m.x) + rnd(-0.4...0.4)
                     speed = rnd(110...150)
                     stateTimer = rnd(0.4...0.9)
+                    turnTargetTime = stateTimer
                     scareCooldown = 1.0
                 }
             }
@@ -543,7 +623,16 @@ final class Fly {
             }
         }
 
+        if signals?.legCommands?.count != model.legs.count
+            || (state != .walking && state != .idle && state != .sleeping) { motorWalking = false }
+        if signals?.legCommands?.count == model.legs.count && (state == .idle || state == .sleeping) {
+            prepareMotorControl(tempo: motorTempo)
+            _ = legDynamics.advance(commands: Array(repeating: LegMotorCommand(), count: model.legs.count), dt: motorDT)
+            motorWalking = true  // retain the articulated standing pose
+        }
+        if !motorWalking { legDynamics.resetContact(grounded: state != .flying) }
         updateLegs(dt: dt)
+        sampleLegFeedback(dt: dt)
         updateWings(dt: dt)
         // slower, deeper breathing while asleep
         let breathe = state == .sleeping ? (1 + 0.05 * sin(time * 1.1))
@@ -556,6 +645,7 @@ final class Fly {
         guard s != state else { return }
         state = s
         stateAge = 0
+        if s != .walking { turnTarget = nil }
     }
 
     // Every behavioral decision here reads a real neuron population's rate.
@@ -578,11 +668,12 @@ final class Fly {
             ledge = nil
             setState(.walking)
             if let m = mouse {
-                saccade = 0        // fleeing turns are instant, not saccadic
-                heading = atan2(pos.y - m.y, pos.x - m.x) + rnd(-0.4...0.4)
+                saccade = 0
+                turnTarget = atan2(pos.y - m.y, pos.x - m.x) + rnd(-0.4...0.4)
             } else { startSaccade() }
             speed = rnd(110...155)
             dartTimer = rnd(0.4...0.9)
+            turnTargetTime = dartTimer
             dartCooldown = 1.2
         }
         // DNg11 (grooming command) hysteresis
@@ -608,11 +699,11 @@ final class Fly {
         }
         // walking speed follows the forward command rate; tempo = temperature
         if state == .walking {
-            if dartTimer == 0 && backwardTimer == 0 {
+            if s.legCommands == nil && dartTimer == 0 && backwardTimer == 0 {
                 let target = (14 + s.walkDrive * 55) * s.tempo
                 speed += (target - speed) * lag(3, dt)
             }
-            if ledge == nil { heading += s.turnBias * dt }   // DNa01/DNa02 steering
+            if s.legCommands == nil && ledge == nil { heading += s.turnBias * dt }
         }
         // spontaneous takeoff, gated on whole-population arousal; flight
         // altitude/effort scales with how aroused the network is
@@ -624,10 +715,11 @@ final class Fly {
 
     private var effectiveSpeed: CGFloat { backwardTimer > 0 ? -22 : speed }
 
-    private func updateWalk(dt: CGFloat, bounds: CGSize) {
+    private func updateWalk(dt: CGFloat, bounds: CGSize, motorMotion: LegBodyMotion? = nil) {
         // refresh the attached ledge from current terrain (windows move/close)
         if let L = ledge {
-            if let cur = terrain.first(where: { $0.id == L.id }), abs(cur.y - L.y) < 40 {
+            if let cur = terrain.first(where: { $0.id == L.id }), abs(cur.y - L.y) < 40,
+               pos.x >= cur.x0 - 6, pos.x <= cur.x1 + 6 {
                 ledge = cur
             } else {
                 ledge = nil
@@ -637,38 +729,49 @@ final class Fly {
         }
         if let L = ledge {
             // walk along the window edge
-            heading += rnd(-1...1) * LEDGE_JITTER * sqrt(dt)
-            let along: CGFloat = cos(heading) >= 0 ? 0 : .pi
-            heading += angleDiff(heading, along) * lag(6, dt)
-            pos.x += cos(heading) * effectiveSpeed * dt
+            if motorMotion == nil { heading += rnd(-1...1) * LEDGE_JITTER * sqrt(dt) }
+            if ledgeHeading == nil { ledgeHeading = cos(heading) >= 0 ? 0 : .pi }
+            if pos.x <= L.x0 + 6 { ledgeHeading = 0 }
+            if pos.x >= L.x1 - 6 { ledgeHeading = .pi }
+            turnToward(ledgeHeading!, dt: dt)
+            pos.x += cos(heading) * (motorMotion?.forward ?? (effectiveSpeed * dt))
             pos.y += (L.y - pos.y) * lag(10, dt)
-            if pos.x <= L.x0 + 6 && cos(heading) < 0 { heading = 0 }
-            if pos.x >= L.x1 - 6 && cos(heading) > 0 { heading = .pi }
             pos.x = clampf(pos.x, L.x0, L.x1)
             if rnd(0...1) < lag(0.05, dt) { ledge = nil }   // wander off the edge
         } else {
-            heading += rnd(-1...1) * WANDER_JITTER * sqrt(dt)
+            ledgeHeading = nil
+            if let target = turnTarget {
+                turnToward(target, dt: dt)
+                if abs(angleDiff(heading, target)) < 0.001 { turnTarget = nil }
+            }
+            let startHeading = heading
+            if let motion = motorMotion { heading += motion.yaw }
+            else { heading += rnd(-1...1) * WANDER_JITTER * sqrt(dt) }
             let hw = bounds.width / 2 - EDGE_MARGIN, hh = bounds.height / 2 - EDGE_MARGIN
             if abs(pos.x) > hw || abs(pos.y) > hh {
                 let toCenter = atan2(-pos.y, -pos.x)
                 heading += angleDiff(heading, toCenter) * lag(4, dt)
             }
-            let v = effectiveSpeed
-            pos.x += cos(heading) * v * dt
-            pos.y += sin(heading) * v * dt
+            let forward = motorMotion?.forward ?? (effectiveSpeed * dt)
+            let lateral = motorMotion?.lateral ?? 0
+            // The mechanics integrates displacement in the frame at the start
+            // of the tick; rotating it by the final yaw applies the turn twice.
+            let translationHeading = motorMotion == nil ? heading : startHeading
+            pos.x += cos(translationHeading) * forward + sin(translationHeading) * lateral
+            pos.y += sin(translationHeading) * forward - cos(translationHeading) * lateral
             pos.x = clampf(pos.x, -bounds.width / 2 + 20, bounds.width / 2 - 20)
             pos.y = clampf(pos.y, -bounds.height / 2 + 20, bounds.height / 2 - 20)
             // walked onto a window edge? latch on
             for L in terrain where pos.x > L.x0 - 8 && pos.x < L.x1 + 8 && abs(pos.y - L.y) < 20 {
                 if rnd(0...1) < lag(0.9, dt) {
                     ledge = L
-                    heading = cos(heading) >= 0 ? 0 : .pi
+                    ledgeHeading = cos(heading) >= 0 ? 0 : .pi
                     break
                 }
             }
         }
         var p = node.position
-        p.z = 0.35 * abs(sin(gaitPhase * .pi * 2))
+        p.z = motorMotion == nil ? 0.35 * abs(sin(gaitPhase * .pi * 2)) : 0
         node.position = p
     }
 
@@ -685,12 +788,13 @@ final class Fly {
         if flightT >= 1 {
             // touchdown flare: the timer ended, but the fly lands only when it
             // has actually descended — hover over the target and settle down.
-            pos.x = flightTo.x + sin(time * 26) * 1.2
-            pos.y = flightTo.y + cos(time * 22) * 1.0
-            pitch = clampf(alt * 0.4, 0, 0.35)   // gentle nose-up flare
+            let settle = min(1, alt / 0.2)
+            pos.x = flightTo.x + sin(time * 26) * 1.2 * settle
+            pos.y = flightTo.y + cos(time * 22) * settle
+            pitch += (clampf(alt * 0.4, 0, 0.35) - pitch) * lag(12, dt)
             alt += (0 - alt) * lag(9, dt)
             applyAltitude()
-            if alt < 0.035 { pos = flightTo; land() }
+            if alt < 0.003 { pos = flightTo; land() }
             return
         }
         let e = smoothstep(flightT)
@@ -700,7 +804,7 @@ final class Fly {
         let wob = sin(time * 32) * 4 * sin(flightT * .pi)
         pos.x = flightFrom.x + dx * e + px * wob
         pos.y = flightFrom.y + dy * e + py * wob
-        heading = atan2(dy, dx) + sin(time * 18) * 0.12
+        turnToward(atan2(dy, dx) + sin(time * 18) * 0.12, dt: dt)
         // altitude: climb, effort-scaled cruise with buzz-wobble, descend to land.
         // Effort stays live: ongoing escape-DN (DNp02/04/11) and arousal activity
         // pushes the fly to beat harder and fly higher mid-flight.
@@ -711,95 +815,126 @@ final class Fly {
         let riseEnv = min(flightT / 0.25, 1)
         let fallEnv = min((1 - flightT) / 0.3, 1)
         let target = effortCurrent * min(riseEnv, fallEnv) * (0.85 + 0.15 * sin(time * 7))
-        pitch = clampf((target - alt) * 2.5, -0.45, 0.45)   // nose up while climbing
+        pitch += (clampf((target - alt) * 2.5, -0.45, 0.45) - pitch) * lag(12, dt)
         alt += (target - alt) * lag(6, dt)
         // higher = closer to the viewer = bigger, and the shadow slides away
         applyAltitude()
     }
 
     private func updateLegs(dt: CGFloat) {
+        if motorWalking {
+            for (leg, feedback) in zip(model.legs, legDynamics.feedback) { leg.apply(feedback) }
+            renderedLegState = state; renderedMotorControl = true
+            return
+        }
+        // Retarget from the displayed pose, including when another transition
+        // interrupts this one. Motor control instead adopts that pose in physics.
+        if renderedLegState != state || renderedMotorControl {
+            legBlendFrom = model.legs.map {
+                var pose = LegFeedback()
+                pose.hipAngle = $0.angle; pose.elevationAngle = $0.lift; pose.kneeAngle = $0.kneeAngle
+                return pose
+            }
+            legBlendTime = 0
+        }
+        renderedLegState = state; renderedMotorControl = false
+        legBlendTime = min(0.18, legBlendTime + dt)
+        let blend = smoothstep(legBlendTime / 0.18)
         let v = abs(effectiveSpeed)
-        let walking = (state == .walking && v > 1)
-        if walking {
-            let amp = clampf(0.20 + v * 0.0022, 0.20, 0.50)
-            let stride = max(5, 2 * amp * 13)
-            let freq = clampf(v / stride, 3, 11)
-            gaitPhase = (gaitPhase + freq * dt).truncatingRemainder(dividingBy: 1)
-            // Swing lasts a near-constant ~35 ms whatever the speed; it is stance
-            // that shortens as the fly speeds up. A fixed fraction did the opposite.
-            let stanceFrac = clampf(1 - SWING_DUR * freq, 0.35, 0.9)
-            for leg in model.legs {
+        let walking = state == .walking && v > 1
+        let amp = clampf(0.20 + v * 0.0022, 0.20, 0.50)
+        let freq = clampf(v / max(5, 2 * amp * 13), 3, 11)
+        if walking { gaitPhase = (gaitPhase + freq * dt).truncatingRemainder(dividingBy: 1) }
+        let stanceFrac = clampf(1 - SWING_DUR * freq, 0.35, 0.9)
+        for (i, leg) in model.legs.enumerated() {
+            var angle: CGFloat = 0, lift: CGFloat = 0, knee: CGFloat = 0.95
+            if walking {
+                knee = 0.75
                 let p = (gaitPhase + leg.phase).truncatingRemainder(dividingBy: 1)
-                if p < stanceFrac {
-                    leg.angle = amp * (1 - 2 * (p / stanceFrac))
-                    leg.lift = 0
-                } else {
-                    let s = (p - stanceFrac) / (1 - stanceFrac)
-                    leg.angle = -amp + 2 * amp * smoothstep(s)
-                    leg.lift = sin(s * .pi) * 0.55
+                if p < stanceFrac { angle = amp * (1 - 2 * p / stanceFrac) }
+                else {
+                    let phase = (p - stanceFrac) / (1 - stanceFrac)
+                    angle = -amp + 2 * amp * smoothstep(phase)
+                    lift = sin(phase * .pi) * 0.55
                 }
-                if backwardTimer > 0 { leg.angle = -leg.angle }
-                leg.apply()
-            }
-        } else if state == .grooming {
-            for leg in model.legs {
+                if backwardTimer > 0 { angle = -angle }
+            } else if state == .grooming {
+                knee = 0.75
                 if leg.isFront {
-                    leg.angle = 0.45 + 0.25 * sin(time * 20 + leg.swingSign * 1.3)
-                    leg.lift = 0.55 + 0.15 * sin(time * 22)
-                } else {
-                    leg.angle += (0 - leg.angle) * lag(8, dt)
-                    leg.lift += (0 - leg.lift) * lag(8, dt)
+                    angle = 0.45 + 0.25 * sin(time * 20 + leg.swingSign * 1.3)
+                    lift = 0.55 + 0.15 * sin(time * 22)
                 }
-                leg.apply()
+            } else if state == .flying {
+                angle = -0.35; lift = 0.5; knee = 0.75
             }
-        } else if state == .flying {
-            for leg in model.legs {
-                leg.angle += (-0.35 - leg.angle) * lag(6, dt)
-                leg.lift += (0.5 - leg.lift) * lag(6, dt)
-                leg.apply()
+            angle = clampf(angle, -LegDynamics.hipLimit, LegDynamics.hipLimit)
+            lift = clampf(lift, LegDynamics.elevationRange.lowerBound, LegDynamics.elevationRange.upperBound)
+            if state != .flying { lift = max(lift, LegDynamics.groundElevation(leg.geometry, knee: knee)) }
+            let from = legBlendFrom[i]
+            leg.angle = from.hipAngle + (angle - from.hipAngle) * blend
+            leg.kneeAngle = from.kneeAngle + (knee - from.kneeAngle) * blend
+            leg.lift = from.elevationAngle + (lift - from.elevationAngle) * blend
+            // Keep the current (possibly blended) knee above the same ground
+            // used by mechanics, so a later handoff needs no position projection.
+            if state != .flying {
+                leg.lift = max(leg.lift, LegDynamics.groundElevation(leg.geometry, knee: leg.kneeAngle))
             }
-        } else {
-            for leg in model.legs {
-                leg.angle += (0 - leg.angle) * lag(10, dt)
-                leg.lift += (0 - leg.lift) * lag(10, dt)
-                leg.apply()
-            }
+            leg.apply()
+        }
+    }
+
+    private func sampleLegFeedback(dt: CGFloat) {
+        let previous = legFeedback
+        let physical = legDynamics.feedback
+        sensedLegFeedback = model.legs.enumerated().map { i, leg in
+            let toe = leg.ankle.convertPosition(SCNVector3(leg.geometry.tarsus, 0, 0), to: node)
+            var value = LegFeedback()
+            value.hipAngle = leg.angle
+            value.kneeAngle = CGFloat(leg.knee.eulerAngles.y)
+            value.elevationAngle = leg.lift
+            value.hipVelocity = (value.hipAngle - previous[i].hipAngle) / max(0.001, dt)
+            value.kneeVelocity = (value.kneeAngle - previous[i].kneeAngle) / max(0.001, dt)
+            value.elevationVelocity = (value.elevationAngle - previous[i].elevationAngle) / max(0.001, dt)
+            value.footX = CGFloat(toe.x); value.footY = CGFloat(toe.y)
+            value.footHeight = CGFloat(toe.z + node.position.z)
+            value.contact = state != .flying && value.footHeight <= 0.015
+            return value
+        }
+        let supports = max(1, sensedLegFeedback.filter(\.contact).count)
+        for i in sensedLegFeedback.indices {
+            sensedLegFeedback[i].load = sensedLegFeedback[i].contact
+                ? (motorWalking ? physical[i].load : 1 / CGFloat(supports)) : 0
         }
     }
 
     private func updateWings(dt: CGFloat) {
-        guard state == .flying else {
-            // grounded threat posture: escape-DN / loom activity raises the wings
-            if !model.foldedWings.isHidden {
-                let raiseTarget: CGFloat = (state != .sleeping
-                    && (liveWing > 0.7 || (brainLive && dartTimer > 0))) ? 1 : 0
-                wingRaise += (raiseTarget - wingRaise) * lag(8, dt)
-                if wingRaise > 0.01 {
-                    for (i, wing) in model.foldedWings.childNodes.enumerated() {
-                        let side: CGFloat = i == 0 ? -1 : 1
-                        wing.eulerAngles = SCNVector3(-0.5 * wingRaise, 0,
-                                                      side * (0.13 + 0.3 * wingRaise))
-                    }
-                }
-            }
-            updateElytra(target: wingRaise, dt: dt)
-            return
+        let flying = state == .flying
+        wingFlightAmount += ((flying ? 1 : 0) - wingFlightAmount) * lag(18, dt)
+        if !flying && wingFlightAmount < 0.0001 { wingFlightAmount = 0 }
+        let raiseTarget: CGFloat = !flying && state != .sleeping
+            && (liveWing > 0.7 || (brainLive && dartTimer > 0)) ? 1 : 0
+        wingRaise += (raiseTarget - wingRaise) * lag(8, dt)
+        if flying || wingFlightAmount > 0 {
+            flapPhase += dt * (22 + 10 * effortCurrent)
         }
-        // visible wing-beat: the wing shapes sweep through a stroke arc,
-        // faster when the live effort is higher
-        flapPhase = (flapPhase + dt * (14 + 10 * effortCurrent)).truncatingRemainder(dividingBy: 1)
         let stroke = sin(flapPhase * 2 * .pi)
+        // Spread before permitting a downstroke, and flatten before folding.
+        // This also preserves the raised-hinge body clearance during transitions.
+        let beat = smoothstep((wingFlightAmount - 0.8) / 0.2)
         for (i, wing) in model.foldedWings.childNodes.enumerated() {
             let side: CGFloat = i == 0 ? -1 : 1
-            wing.eulerAngles = SCNVector3(stroke * 0.35, 0,
-                                          side * (0.45 + 0.35 * (0.5 + 0.5 * stroke)))
+            let groundedSpread = 0.13 + 0.3 * wingRaise
+            let spread = groundedSpread + (model.wingFlightSpread - groundedSpread) * wingFlightAmount
+            wing.eulerAngles = SCNVector3(-0.5 * wingRaise * (1 - wingFlightAmount) + stroke * 0.35 * beat,
+                0, side * (spread + 0.175 * stroke * beat))
         }
-        let flick = 0.10 + 0.14 * abs(stroke)
-        model.blurWingL.opacity = flick
-        model.blurWingR.opacity = flick
-        model.blurWingL.eulerAngles = SCNVector3(0, 0,  0.45 + stroke * 0.2)
+        let flick = (0.10 + 0.14 * abs(stroke)) * wingFlightAmount
+        model.blurWingL.opacity = flick; model.blurWingR.opacity = flick
+        model.blurWingL.isHidden = wingFlightAmount == 0
+        model.blurWingR.isHidden = wingFlightAmount == 0
+        model.blurWingL.eulerAngles = SCNVector3(0, 0, 0.45 + stroke * 0.2)
         model.blurWingR.eulerAngles = SCNVector3(0, 0, -0.45 - stroke * 0.2)
-        updateElytra(target: 1, dt: dt)
+        updateElytra(target: flying ? 1 : wingRaise, dt: dt)
     }
 
     /// Display only. The wing cases swing outward and tip up when airborne or

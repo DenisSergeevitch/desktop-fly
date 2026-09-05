@@ -23,6 +23,7 @@ export class SignalBuilder {
     s.groomDrive = sim.rateGroom / 8;
     s.wingDrive = clampf(sim.rateEscW / 10, 0, 1.3);
     s.arousal = clampf(sim.ratePop / 20, 0, 1);
+    s.legCommands = sim.locomotor ? sim.locomotor.commands : null;
     return s;
   }
 }

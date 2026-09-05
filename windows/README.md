@@ -2,11 +2,21 @@
 
 The Windows port of DesktopFly: the same 3D fruit fly on a transparent
 desktop overlay, driven by the same 1 kHz leaky-integrate-and-fire simulation
-of 668 real neurons from the FlyWire connectome (FAFB v783).
+of 668 real brain neurons from the FlyWire connectome (FAFB v783), coupled
+to a walking circuit extracted from the MaleCNS brain-and-nerve-cord dataset.
 
-The brain is a line-by-line port of `Sim.swift`; the body and behavior are a
-line-by-line port of `FlyModel.swift`. Both test suites came across with them
-and are the ground truth here just as they are on macOS.
+The brain, nerve cord, and leg mechanics mirror the Swift implementation.
+Walking uses six sets of antagonist motor outputs, articulated legs, foot
+contact and load feedback. Grounded foot motion supplies body translation
+and yaw. The whole feedback loop runs at a fixed 120 Hz, so 60 Hz and 120 Hz
+displays produce the same simulation. The legacy body path remains available for old bundles and extra
+flies without a simulated brain.
+
+The extracted anatomy and synapse counts are measured data. Coupling the
+female FlyWire brain to the male circuit by descending-neuron type, neuron
+dynamics, muscle actuation, rhythm generation and body mechanics are modeling
+assumptions, not a measured complete digital fly. The brain window still
+shows the FlyWire brain rather than the separate MaleCNS nerve-cord network.
 
 ## Why a port and not a rebuild
 
@@ -32,8 +42,9 @@ rewritten; everything that computes came over unchanged in behavior.
 npm install
 npm start              # tray icon; quit from there
 npm run simtest        # circuit invariants (MUST pass after sim changes)
-npm run behaviortest   # 18 end-to-end sim -> body checks
-npm test               # both
+npm run behaviortest   # existing end-to-end brain -> behavior checks
+npm run locomotortest  # MaleCNS causal paths, joints, contact, steering and reverse
+npm test               # all three suites
 ```
 
 `DESKTOPFLY_DEBUG=1 npm start` logs window terrain, overlay geometry and
@@ -92,11 +103,16 @@ overlay therefore stays resizable and the scene is always told the window's
 | `renderer/brain.js` | port of `BrainView.swift` |
 | `src/sim.js` | port of `Sim.swift` (`LIFSim`, `SpikeBus`, `BrainSignals`) |
 | `src/flymodel.js` | port of `FlyModel.swift` (body geometry + behavior) |
+| `src/locomotor.js` | MaleCNS nerve-cord simulation and motor readout |
+| `src/legdynamics.js` | articulated leg mechanics and ground contact |
 | `src/signals.js` | port of `SignalBuilder` |
 | `src/win32.js` | user32/dwmapi through koffi |
 | `src/environment.js` | circadian curve, CPU-load tempo |
 | `src/data.js` | Node-only JSON loading (kept out of `sim.js` for the renderer) |
-| `test/` | ports of `--simtest` and `--behaviortest` |
+| `test/` | corresponding `--simtest`, `--behaviortest` and `--locomotortest` suites |
 
-Data comes from `../data/` — the same shipped `brain_points.json` and
-`circuit.json`, under the same CC BY-NC 4.0 terms.
+Data comes from `../data/`: `brain_points.json`, `circuit.json`, and
+`locomotor_circuit.json`. Source URLs, releases, extraction details and
+limitations for the new circuit are recorded in its metadata,
+[`LOCOMOTOR_PROVENANCE.md`](../data/LOCOMOTOR_PROVENANCE.md), and the root README. Old bundles without the locomotor file retain legacy walking;
+a malformed locomotor file is an explicit load error.
