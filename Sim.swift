@@ -5,6 +5,26 @@
 import Foundation
 import simd
 
+// Membrane noise needs one draw per neuron per simulated millisecond — ~670,000
+// a second. SystemRandomNumberGenerator is an AES-CTR CSPRNG, and its ccrng/
+// ccaes frames were a measurable slice of the profile for what is a jitter term.
+// Seed from the system generator, then run splitmix64: still uncorrelated, at a
+// few instructions per draw. Seeded test runs never reach this (see TestRandom).
+struct FastRandom: RandomNumberGenerator {
+    private var state: UInt64
+    init() {
+        var system = SystemRandomNumberGenerator()
+        state = system.next()
+    }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
 // Opt-in, repeatable test stimuli. Without reset(), every call below delegates
 // to the same platform RNG used by the application before test seeding existed.
 // The test stream matches windows/test/random.js: FNV-1a(label), then LCG32.
@@ -31,7 +51,7 @@ enum TestRandom {
         return range.lowerBound + (range.upperBound - range.lowerBound) * Float(u)
     }
 
-    static func float(in range: ClosedRange<Float>, using rng: inout SystemRandomNumberGenerator) -> Float {
+    static func float(in range: ClosedRange<Float>, using rng: inout some RandomNumberGenerator) -> Float {
         guard let u = unit() else { return Float.random(in: range, using: &rng) }
         return range.lowerBound + (range.upperBound - range.lowerBound) * Float(u)
     }
@@ -46,7 +66,7 @@ enum TestRandom {
         return range.lowerBound + min(range.count - 1, Int(u * Double(range.count)))
     }
 
-    static func integer(in range: ClosedRange<Int>, using rng: inout SystemRandomNumberGenerator) -> Int {
+    static func integer(in range: ClosedRange<Int>, using rng: inout some RandomNumberGenerator) -> Int {
         guard let u = unit() else { return Int.random(in: range, using: &rng) }
         let count = range.upperBound - range.lowerBound + 1
         return range.lowerBound + min(count - 1, Int(u * Double(count)))
@@ -143,6 +163,7 @@ final class LIFSim {
     let locomotor: LocomotorSim?
     var legFeedback: [LegFeedback] = []
     private var cordSourceGroups: [(type: String, side: String, count: Int)] = []
+    private var cordSourceGroupId: [Int] = []   // parallel: resolved LocomotorSim group
     private var cordSourceOf: [Int] = []
     private var cordSourceRates: [Float] = []
     let n: Int
@@ -173,6 +194,11 @@ final class LIFSim {
     private(set) var ascend: [Int] = []    // ascending partners (leg proprioception)
     private(set) var sens: [Int] = []      // sensory partners (air-puff pathway)
     private var ascendPhase: [Float] = []  // per-ascending-neuron gait phase offset
+    // Per-spike classification, resolved once. The counting switch below runs for
+    // every spike of every simulated millisecond, where a String switch plus the
+    // `dnaL.contains(i)` linear scan cost more than the integration it tallies.
+    private enum Tally: UInt8 { case none = 0, loom, dnaLeft, dnaRight, mdn, fwd, groom, escw, gf }
+    private var tally: [UInt8] = []
 
     // inputs (0..1), set each frame by the coordinator
     var loomL: Float = 0
@@ -201,6 +227,10 @@ final class LIFSim {
     // fiber fire before feedforward inhibition arrives.
     private let inhDelayMs = 4
     private var inhQueue: [[Float]]
+    // Which entries of each inhQueue slot are actually non-zero. Scanning all n
+    // floats per slot per millisecond dominated the delayed-inhibition delivery
+    // even though only a handful of targets are ever pending.
+    private var inhTargets: [[Int32]]
     private var qHead = 0
 
     // params
@@ -216,7 +246,7 @@ final class LIFSim {
     private var burstNext = 12_000
 
     let spikeBus: SpikeBus?
-    private var rng = SystemRandomNumberGenerator()
+    private var rng = FastRandom()
 
     // "optogenetic" stimulation from brain-window clicks (any thread)
     private struct Stim { let idx: [Int]; let strength: Float; let durationMs: Int; var untilMs = 0 }
@@ -246,6 +276,7 @@ final class LIFSim {
         v = [Float](repeating: 0, count: n)
         refr = [Float](repeating: 0, count: n)
         inhQueue = Array(repeating: [Float](repeating: 0, count: n), count: 5)
+        inhTargets = Array(repeating: [], count: 5)
 
         for (i, nr) in circuit.neurons.enumerated() {
             switch nr.role {
@@ -266,6 +297,16 @@ final class LIFSim {
             }
         }
         ascendPhase = ascend.map { _ in TestRandom.float(in: 0...(2 * Float.pi)) }
+
+        tally = [UInt8](repeating: Tally.none.rawValue, count: n)
+        for i in loomLeft + loomRight { tally[i] = Tally.loom.rawValue }
+        for i in dnaL { tally[i] = Tally.dnaLeft.rawValue }
+        for i in dnaR { tally[i] = Tally.dnaRight.rawValue }
+        for i in mdn { tally[i] = Tally.mdn.rawValue }
+        for i in fwd { tally[i] = Tally.fwd.rawValue }
+        for i in groom { tally[i] = Tally.groom.rawValue }
+        for i in escw { tally[i] = Tally.escw.rawValue }
+        for i in gf { tally[i] = Tally.gf.rawValue }
 
         // Heterogeneous baseline drive: interneurons get enough to crackle at a
         // few Hz; sensory and command neurons stay quiet unless driven.
@@ -324,6 +365,14 @@ final class LIFSim {
             w[fill[pre]] = weight
             fill[pre] += 1
         }
+
+        // Resolve the homolog group names to indices once. The step loop pushes
+        // these rates every simulated millisecond; building the "type:side" key
+        // there meant a string interpolation and a dictionary hash 8,000 times a
+        // second for eight values that never change identity.
+        cordSourceGroupId = cordSourceGroups.map { g in
+            locomotor?.descendingGroup(g.type, side: g.side) ?? -1
+        }
     }
 
     func consumeGF() -> Bool {
@@ -374,10 +423,12 @@ final class LIFSim {
             }
 
             // deliver delayed inhibition scheduled for this millisecond
-            for j in 0..<n where inhQueue[qHead][j] != 0 {
+            for j32 in inhTargets[qHead] {
+                let j = Int(j32)
                 v[j] = max(-2, v[j] + inhQueue[qHead][j])
                 inhQueue[qHead][j] = 0
             }
+            inhTargets[qHead].removeAll(keepingCapacity: true)
 
             var spiked: [Int] = []
             for i in 0..<n where refr[i] <= 0 && v[i] >= threshold {
@@ -390,7 +441,10 @@ final class LIFSim {
                 for k in rowStart[i]..<rowStart[i + 1] {
                     let j = Int(colIdx[k])
                     if w[k] >= 0 { v[j] = max(-2, v[j] + w[k]) }
-                    else { inhQueue[inhSlot][j] += w[k] }
+                    else {
+                        if inhQueue[inhSlot][j] == 0 { inhTargets[inhSlot].append(Int32(j)) }
+                        inhQueue[inhSlot][j] += w[k]
+                    }
                 }
             }
             qHead = (qHead + 1) % inhQueue.count
@@ -398,14 +452,15 @@ final class LIFSim {
             // group rates (Hz per neuron, EMA)
             var cLoom = 0, cDL = 0, cDR = 0, cM = 0, cF = 0, cG = 0, cW = 0
             for i in spiked {
-                switch roles[i] {
-                case "lc4", "lplc2": cLoom += 1
-                case "dna01", "dna02": if dnaL.contains(i) { cDL += 1 } else { cDR += 1 }
-                case "mdn": cM += 1
-                case "dnp09": cF += 1
-                case "dng11": cG += 1
-                case "escw": cW += 1
-                case "gf": gfLatch = true
+                switch tally[i] {
+                case Tally.loom.rawValue: cLoom += 1
+                case Tally.dnaLeft.rawValue: cDL += 1
+                case Tally.dnaRight.rawValue: cDR += 1
+                case Tally.mdn.rawValue: cM += 1
+                case Tally.fwd.rawValue: cF += 1
+                case Tally.groom.rawValue: cG += 1
+                case Tally.escw.rawValue: cW += 1
+                case Tally.gf.rawValue: gfLatch = true
                 default: break
                 }
             }
@@ -425,8 +480,8 @@ final class LIFSim {
                     let group = cordSourceOf[i]
                     cordSourceRates[group] += 1000 * rateAlpha / Float(cordSourceGroups[group].count)
                 }
-                for (i, group) in cordSourceGroups.enumerated() {
-                    cord.setDescending(group.type, side: group.side, rate: cordSourceRates[i])
+                for (i, group) in cordSourceGroupId.enumerated() where group >= 0 {
+                    cord.setDescending(group: group, rate: cordSourceRates[i])
                 }
                 cord.step(1)
             }

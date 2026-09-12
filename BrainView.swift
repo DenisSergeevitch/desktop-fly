@@ -147,28 +147,72 @@ final class BrainRenderDriver: NSObject, SCNSceneRendererDelegate {
     let sim: LIFSim
     let flashPool: [SCNNode]
     private var next = 0
+    // Fade state per pool slot, stepped by hand. The pool holds a few dozen
+    // nodes while a single frame drains hundreds of sampled spikes, so the old
+    // one-SCNAction-per-spike path built and immediately cancelled thousands of
+    // action sequences a second — it was the brain window's largest cost.
+    private var fadeLeft: [Double]
+    private var fadeSpan: [Double]
+    private var fadeFrom: [Double]
+    private var lastTime: TimeInterval = 0
 
     init(sim: LIFSim, flashPool: [SCNNode]) {
         self.sim = sim
         self.flashPool = flashPool
+        fadeLeft = [Double](repeating: 0, count: flashPool.count)
+        fadeSpan = [Double](repeating: 1, count: flashPool.count)
+        fadeFrom = [Double](repeating: 0, count: flashPool.count)
     }
 
     func flash(neuron: Int, isGF: Bool) {
-        guard neuron < sim.n, !flashPool.isEmpty else { return }
-        let node = flashPool[next]
+        guard !flashPool.isEmpty else { return }
+        let slot = next
         next = (next + 1) % flashPool.count
+        light(slot: slot, neuron: neuron, isGF: isGF)
+    }
+
+    private func light(slot: Int, neuron: Int, isGF: Bool) {
+        guard neuron < sim.n else { return }
+        let node = flashPool[slot]
         let p = sim.positions[neuron]
         node.position = SCNVector3(CGFloat(p.x), CGFloat(p.y), CGFloat(p.z))
         node.isHidden = false
-        node.removeAllActions()
         node.opacity = isGF ? 1.0 : 0.8
         node.scale = isGF ? SCNVector3(3.2, 3.2, 3.2) : SCNVector3(1, 1, 1)
-        node.runAction(.sequence([.fadeOut(duration: isGF ? 0.6 : 0.28), .hide()]))
+        fadeFrom[slot] = isGF ? 1.0 : 0.8
+        fadeSpan[slot] = isGF ? 0.6 : 0.28      // same durations as the old fadeOut
+        fadeLeft[slot] = fadeSpan[slot]
     }
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        let dt = lastTime == 0 ? 0 : max(0, min(0.25, time - lastTime))
+        lastTime = time
+
+        for slot in flashPool.indices where fadeLeft[slot] > 0 {
+            fadeLeft[slot] -= dt
+            if fadeLeft[slot] <= 0 {
+                fadeLeft[slot] = 0
+                flashPool[slot].isHidden = true          // the old .hide() tail
+            } else {
+                flashPool[slot].opacity = CGFloat(fadeFrom[slot] * fadeLeft[slot] / fadeSpan[slot])
+            }
+        }
+
         guard let bus = sim.spikeBus else { return }
-        for e in bus.popAll() { flash(neuron: e.neuron, isGF: e.isGF) }
+        let events = bus.popAll()
+        guard !events.isEmpty else { return }
+        // Resolve the round-robin before touching SceneKit: every slot but the
+        // last one written per frame is overwritten before it is ever drawn, so
+        // replaying the assignments into a local buffer gives the identical
+        // final state with one node update per slot instead of one per spike.
+        var latest = [(neuron: Int, isGF: Bool)?](repeating: nil, count: flashPool.count)
+        for e in events {
+            latest[next] = e
+            next = (next + 1) % flashPool.count
+        }
+        for (slot, e) in latest.enumerated() {
+            if let e { light(slot: slot, neuron: e.neuron, isGF: e.isGF) }
+        }
     }
 }
 

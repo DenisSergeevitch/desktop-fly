@@ -44,6 +44,18 @@ struct LocomotorParameters {
 }
 
 final class LocomotorSim {
+    // The per-millisecond loops below run over ~1,000 neurons a thousand times a
+    // second, so everything they touch is resolved to an integer index here at
+    // init: a string compare, a dictionary hash, or a copy of a neuron struct
+    // (six retained String fields) inside those loops costs more than the LIF
+    // arithmetic it guards. Names still come from the data; only lookups change.
+    static let motorChannelNames = [
+        "coxa_promotor", "coxa_anterior_rotator", "coxa_remotor", "coxa_posterior_rotator",
+        "trochanter_flexor", "trochanter_extensor", "tibia_flexor", "tibia_extensor",
+    ]
+    private enum Role: UInt8 { case other = 0, motor, sensory, descending, ascending }
+    private enum SensoryKind: UInt8 { case load = 0, hairPlate, excursion }
+
     let circuit: LocomotorCircuitFile
     let n: Int
     private var voltage: [Double]
@@ -59,9 +71,13 @@ final class LocomotorSim {
     private var weights: [Double]
     private var drive: [Double]
     private var sensoryDrive: [Double]
-    private var commandGroups: [String: [Int]] = [:]
-    private var motorGroups = Array(repeating: [String: [Int]](), count: 6)
+    private var roleCode: [UInt8] = []
+    private var commandGroupIds: [[Int]] = []
+    private var commandGroupIndex: [String: Int] = [:]
+    private var motorChannelIds: [[Int]] = []   // leg * motorChannelNames.count + channel
     private var sensory: [Int] = []
+    private var sensoryLeg: [Int] = []          // parallel to `sensory`
+    private var sensoryKind: [UInt8] = []       // parallel to `sensory`
     private(set) var commands = Array(repeating: LegMotorCommand(), count: 6)
     private(set) var totalSpikes = 0
     private(set) var motorSpikes = 0
@@ -69,7 +85,16 @@ final class LocomotorSim {
     private(set) var simMs = 0
     var feedback: [LegFeedback] = []
     // Lesions are diagnostic interventions, used to verify actual causal paths.
-    var silenced: Set<Int> = []
+    // The set stays the API; the hot loop reads the mirrored flags instead, so a
+    // normal run costs one Bool check rather than a hash per neuron per ms.
+    var silenced: Set<Int> = [] {
+        didSet {
+            anySilenced = !silenced.isEmpty
+            for i in 0..<n { silencedFlag[i] = silenced.contains(i) }
+        }
+    }
+    private var silencedFlag: [Bool] = []
+    private var anySilenced = false
     var synapsesEnabled = true
     var feedbackEnabled = true
     let parameters: LocomotorParameters
@@ -89,6 +114,17 @@ final class LocomotorSim {
         nextInhibitory = .init(repeating: 0, count: n)
         drive = .init(repeating: 0, count: n)
         sensoryDrive = .init(repeating: 0, count: n)
+        silencedFlag = .init(repeating: false, count: n)
+        roleCode = circuit.neurons.map {
+            switch $0.role {
+            case "motor": return Role.motor.rawValue
+            case "sensory": return Role.sensory.rawValue
+            case "descending": return Role.descending.rawValue
+            case "ascending": return Role.ascending.rawValue
+            default: return Role.other.rawValue
+            }
+        }
+        motorChannelIds = Array(repeating: [], count: 6 * Self.motorChannelNames.count)
         var counts = Array(repeating: 0, count: n)
         var inputTotal = Array(repeating: Double(0), count: n)
         for e in circuit.edges {
@@ -110,11 +146,30 @@ final class LocomotorSim {
         }
         for (i, nr) in circuit.neurons.enumerated() {
             if nr.role == "descending" {
-                commandGroups["\(nr.type):\(nr.side)", default: []].append(i)
+                let key = "\(nr.type):\(nr.side)"
+                let group: Int
+                if let existing = commandGroupIndex[key] { group = existing }
+                else {
+                    group = commandGroupIds.count
+                    commandGroupIndex[key] = group
+                    commandGroupIds.append([])
+                }
+                commandGroupIds[group].append(i)
             }
-            if nr.role == "sensory", nr.leg != nil { sensory.append(i) }
-            if nr.role == "motor", let leg = nr.leg, let channel = nr.motorChannel {
-                motorGroups[leg][channel, default: []].append(i)
+            if nr.role == "sensory", let leg = nr.leg {
+                sensory.append(i)
+                sensoryLeg.append(leg)
+                // Same three-way split the step loop used to spell out with
+                // string compares; the pooling rationale is unchanged.
+                let kind: SensoryKind
+                if nr.sensoryKind == "campaniform" || nr.sensoryKind == "contact" { kind = .load }
+                else if nr.sensoryKind == "hair_plate" { kind = .hairPlate }
+                else { kind = .excursion }
+                sensoryKind.append(kind.rawValue)
+            }
+            if nr.role == "motor", let leg = nr.leg, let channel = nr.motorChannel,
+               let slot = Self.motorChannelNames.firstIndex(of: channel) {
+                motorChannelIds[leg * Self.motorChannelNames.count + slot].append(i)
             }
         }
     }
@@ -122,21 +177,40 @@ final class LocomotorSim {
     // A modeled homologous population-rate interface between female FlyWire
     // and male CNS specimens. It adds current, never fabricated graph edges.
     func setDescending(_ type: String, side: String, rate: Float) {
-        for i in commandGroups["\(type):\(side)"] ?? [] {
-            drive[i] = min(0.35, max(0, Double(rate)) * 0.004)
-        }
+        guard let group = commandGroupIndex["\(type):\(side)"] else { return }
+        setDescending(group: group, rate: rate)
+    }
+
+    // Index form of the above, for the caller that resolves its groups once.
+    func descendingGroup(_ type: String, side: String) -> Int? {
+        commandGroupIndex["\(type):\(side)"]
+    }
+
+    func setDescending(group: Int, rate: Float) {
+        let value = min(0.35, max(0, Double(rate)) * 0.004)
+        for i in commandGroupIds[group] { drive[i] = value }
     }
 
     func meanRate(role: String, leg: Int? = nil) -> Float {
-        let ids = circuit.neurons.indices.filter {
-            circuit.neurons[$0].role == role && (leg == nil || circuit.neurons[$0].leg == leg)
-        }
+        let ids = indices(role: role, leg: leg)
         return Float(ids.reduce(0) { $0 + rates[$1] } / Double(max(1, ids.count)))
     }
 
     func indices(role: String, leg: Int? = nil) -> [Int] {
-        circuit.neurons.indices.filter {
-            circuit.neurons[$0].role == role && (leg == nil || circuit.neurons[$0].leg == leg)
+        guard let code = Self.roleCode(role) else { return [] }
+        return (0..<n).filter {
+            roleCode[$0] == code && (leg == nil || circuit.neurons[$0].leg == leg)
+        }
+    }
+
+    private static func roleCode(_ role: String) -> UInt8? {
+        switch role {
+        case "motor": return Role.motor.rawValue
+        case "sensory": return Role.sensory.rawValue
+        case "descending": return Role.descending.rawValue
+        case "ascending": return Role.ascending.rawValue
+        case "premotor": return Role.other.rawValue
+        default: return nil
         }
     }
 
@@ -147,21 +221,22 @@ final class LocomotorSim {
             // Leg-local sensory transduction, without global gait phase or
             // neuron-ID-derived tuning. Missing direction tuning is pooled:
             // proprioceptors encode joint excursion/speed; contact sensors load.
-            for i in sensory { sensoryDrive[i] = 0 }
+            for k in sensory.indices { sensoryDrive[sensory[k]] = 0 }
             if feedbackEnabled && feedback.count == 6 {
-                for i in sensory {
-                    let nr = circuit.neurons[i], f = feedback[nr.leg!]
+                for k in sensory.indices {
+                    let f = feedback[sensoryLeg[k]]
                     let value: CGFloat
-                    if nr.sensoryKind == "campaniform" || nr.sensoryKind == "contact" {
+                    switch sensoryKind[k] {
+                    case SensoryKind.load.rawValue:
                         value = f.contact ? min(1, f.load * 6) : 0
-                    } else if nr.sensoryKind == "hair_plate" {
+                    case SensoryKind.hairPlate.rawValue:
                         value = min(1, abs(f.hipAngle) / LegDynamics.hipLimit
                                     + abs(f.elevationVelocity) / 20)
-                    } else {
+                    default:
                         value = min(1, abs(f.kneeVelocity) / 20 + abs(f.hipVelocity) / 16
                                       + abs(f.kneeAngle - LegDynamics.restKnee) * 0.35)
                     }
-                    sensoryDrive[i] = Double(value) * 0.10
+                    sensoryDrive[sensory[k]] = Double(value) * 0.10
                 }
             }
             for i in 0..<n {
@@ -175,7 +250,7 @@ final class LocomotorSim {
             for i in 0..<n {
                 rates[i] *= 0.9048374 // 10 ms rate time constant for fast muscles
                 adaptation[i] *= 0.9950125 // 200 ms spike-frequency adaptation
-                if silenced.contains(i) {
+                if anySilenced && silencedFlag[i] {
                     voltage[i] = 0; rates[i] = 0; continue
                 }
                 if refractory[i] > 0 { refractory[i] -= 1; continue }
@@ -188,8 +263,8 @@ final class LocomotorSim {
                     adaptation[i] += parameters.adaptationKick
                     rates[i] += 95.16258
                     totalSpikes += 1
-                    if circuit.neurons[i].role == "motor" { motorSpikes += 1 }
-                    if circuit.neurons[i].role == "sensory" { sensorySpikes += 1 }
+                    if roleCode[i] == Role.motor.rawValue { motorSpikes += 1 }
+                    else if roleCode[i] == Role.sensory.rawValue { sensorySpikes += 1 }
                     if synapsesEnabled {
                         for e in rowStart[i]..<rowStart[i + 1] {
                             if weights[e] >= 0 { nextExcitatory[targets[e]] += weights[e] }
@@ -200,16 +275,20 @@ final class LocomotorSim {
             }
         }
         for leg in 0..<6 {
-            func activity(_ channel: String) -> CGFloat {
-                let ids = motorGroups[leg][channel] ?? []
-                let rate = ids.reduce(0) { $0 + rates[$1] } / Double(max(1, ids.count))
+            let base = leg * Self.motorChannelNames.count
+            func activity(_ slot: Int) -> CGFloat {
+                let ids = motorChannelIds[base + slot]
+                guard !ids.isEmpty else { return 0 }
+                let rate = ids.reduce(0) { $0 + rates[$1] } / Double(ids.count)
                 return CGFloat(rate / (rate + 50))
             }
+            // Slots follow motorChannelNames: promotor, anterior rotator, remotor,
+            // posterior rotator, trochanter flexor/extensor, tibia flexor/extensor.
             commands[leg] = LegMotorCommand(
-                protract: max(activity("coxa_promotor"), activity("coxa_anterior_rotator")),
-                retract: max(activity("coxa_remotor"), activity("coxa_posterior_rotator")),
-                lift: activity("trochanter_flexor"), depress: activity("trochanter_extensor"),
-                flex: activity("tibia_flexor"), extend: activity("tibia_extensor"))
+                protract: max(activity(0), activity(1)),
+                retract: max(activity(2), activity(3)),
+                lift: activity(4), depress: activity(5),
+                flex: activity(6), extend: activity(7))
         }
     }
 }
