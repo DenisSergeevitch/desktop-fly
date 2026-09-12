@@ -972,8 +972,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scnView.scene = coordinator.scene
         scnView.backgroundColor = .clear
         scnView.allowsCameraControl = false
-        scnView.antialiasingMode = .multisampling4X
-        scnView.preferredFramesPerSecond = 120   // ProMotion; caps at display refresh
+        // A borderless full-screen transparent layer makes the compositor redraw
+        // the desktop behind it at whatever rate this view runs, so the overlay's
+        // frame rate costs more than this process's own render pass. 60 Hz and 2x
+        // MSAA are near-indistinguishable on a body this small; DESKTOPFLY_QUALITY=high
+        // restores 120 Hz / 4x. Neither setting changes the model: SimulationClock
+        // still advances 120 fixed ticks (1000 sim-ms) per second at any frame rate.
+        let highQuality = ProcessInfo.processInfo.environment["DESKTOPFLY_QUALITY"] == "high"
+        scnView.antialiasingMode = highQuality ? .multisampling4X : .multisampling2X
+        scnView.preferredFramesPerSecond = highQuality ? 120 : 60   // caps at display refresh
         if ProcessInfo.processInfo.environment["DESKTOPFLY_FPS"] != nil {
             fputs("display max fps: \(NSScreen.main?.maximumFramesPerSecond ?? 0)\n", stderr)
         }
