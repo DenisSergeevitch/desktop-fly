@@ -28,7 +28,12 @@ models. Do not claim biologically calibrated walking from anatomical checks.
 
 ```sh
 ./build.sh                     # bare swiftc, -swift-version 5, no Xcode project
+                               # -O -wmo -enforce-exclusivity=unchecked; see build.sh
+                               # for why the exclusivity check is off (it was the
+                               # single largest cost in the profile)
 ./DesktopFly                   # menu-bar 🪰; quit from there
+                               # DESKTOPFLY_QUALITY=high -> 120 fps / 4x MSAA overlay
+                               # (default 60 / 2x; neither changes the model)
 ./DesktopFly --simtest         # circuit invariants (MUST pass after sim/etl changes)
 ./DesktopFly --behaviortest    # end-to-end sim→body checks (MUST pass after behavior changes)
 ./DesktopFly --locomotortest   # active MaleCNS/body loop (MUST pass after shared motor changes)
