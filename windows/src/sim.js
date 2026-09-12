@@ -80,6 +80,10 @@ export class LIFSim {
     this.v = new Float32Array(n);
     this.refr = new Float32Array(n);
     this.inhQueue = Array.from({ length: 5 }, () => new Float32Array(n));
+    // Which entries of each slot are actually non-zero. Scanning all n floats per
+    // slot per millisecond dominated delayed-inhibition delivery even though only
+    // a handful of targets are ever pending. Mirrors Sim.swift's inhTargets.
+    this.inhTargets = Array.from({ length: 5 }, () => []);
     this.qHead = 0;
 
     // groups
@@ -144,6 +148,11 @@ export class LIFSim {
       this.cordSourceOf[i] = group;
     });
     this.cordSourceRates = new Float32Array(this.cordSourceGroups.length);
+    // Resolve the homolog group names to indices once. The step loop pushes these
+    // rates every simulated millisecond; building the "type:side" key there meant
+    // a string build and a Map hash 8,000 times a second for eight fixed values.
+    this.cordSourceGroupId = this.cordSourceGroups.map((group) =>
+      (this.locomotor ? this.locomotor.descendingGroup(group.type, group.side) : -1));
 
     // hot-loop lookups (Swift used string switches and dnaL.contains)
     // 1 loom, 2 dnaL, 3 dnaR, 4 mdn, 5 fwd, 6 groom, 7 escw, 8 gf
@@ -299,9 +308,12 @@ export class LIFSim {
 
       // deliver delayed inhibition scheduled for this millisecond
       const q = this.inhQueue[this.qHead];
-      for (let j = 0; j < n; j++) {
+      const qTargets = this.inhTargets[this.qHead];
+      for (let t = 0; t < qTargets.length; t++) {
+        const j = qTargets[t];
         if (q[j] !== 0) { v[j] = Math.max(-2, v[j] + q[j]); q[j] = 0; }
       }
+      qTargets.length = 0;
 
       let nSpiked = 0;
       for (let i = 0; i < n; i++) {
@@ -312,13 +324,14 @@ export class LIFSim {
       }
       this.totalSpikes += nSpiked;
       const inh = this.inhQueue[(this.qHead + this.inhDelayMs) % this.inhQueue.length];
+      const inhTargets = this.inhTargets[(this.qHead + this.inhDelayMs) % this.inhQueue.length];
       for (let s = 0; s < nSpiked; s++) {
         const i = spiked[s];
         const end = this.rowStart[i + 1];
         for (let k = this.rowStart[i]; k < end; k++) {
           const j = this.colIdx[k], wk = this.w[k];
           if (wk >= 0) v[j] = Math.max(-2, v[j] + wk);
-          else inh[j] += wk;
+          else { if (inh[j] === 0) inhTargets.push(j); inh[j] += wk; }
         }
       }
       this.qHead = (this.qHead + 1) % this.inhQueue.length;
@@ -355,8 +368,10 @@ export class LIFSim {
           const group = this.cordSourceOf[spiked[s]];
           if (group >= 0) this.cordSourceRates[group] += 1000 * a / this.cordSourceGroups[group].count;
         }
-        this.cordSourceGroups.forEach((group, i) =>
-          this.locomotor.setDescending(group.type, group.side, this.cordSourceRates[i]));
+        this.cordSourceGroups.forEach((group, i) => {
+          const id = this.cordSourceGroupId[i];
+          if (id >= 0) this.locomotor.setDescendingGroup(id, this.cordSourceRates[i]);
+        });
         this.locomotor.step(1);
       }
 
